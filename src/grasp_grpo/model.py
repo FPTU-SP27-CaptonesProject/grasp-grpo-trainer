@@ -12,6 +12,21 @@ class Action:
     token_logprobs: list[float]
 
 
+def _token_logprobs(model, prefix: list[int], response_ids: list[int]):
+    """Token log probabilities under raw model logits, before sampling warpers."""
+    import torch
+    import torch.nn.functional as F
+
+    device = next(model.parameters()).device
+    ids = torch.tensor([prefix + response_ids], device=device)
+    logits = model(input_ids=ids).logits[:, :-1]
+    targets = ids[:, 1:]
+    start = len(prefix) - 1
+    return F.log_softmax(logits[:, start : start + len(response_ids)], dim=-1).gather(
+        -1, targets[:, start : start + len(response_ids)].unsqueeze(-1)
+    ).squeeze(-1)
+
+
 def load_policy(checkpoint: str, *, trainable: bool, load_in_4bit: bool = False):
     import torch
     from peft import PeftConfig, PeftModel, prepare_model_for_kbit_training
@@ -65,30 +80,24 @@ def generate(model, tokenizer, prompt: str, *, samples: int, max_new_tokens: int
         generation.update(temperature=temperature, top_p=top_p)
     with torch.no_grad():
         output = model.generate(**inputs, **generation)
-        transition = model.compute_transition_scores(output.sequences, output.scores, normalize_logits=True)
     width = inputs["input_ids"].shape[1]
     output_actions = []
     for i, ids in enumerate(output.sequences[:, width:]):
-        scores = transition[i, : ids.shape[0]]
         token_ids = ids.detach().cpu().tolist()
         eos = tokenizer.eos_token_id
         if eos in token_ids:
             end = token_ids.index(eos) + 1
-            token_ids, scores = token_ids[:end], scores[:end]
-        output_actions.append(Action(tokenizer.decode(token_ids, skip_special_tokens=True).strip(), token_ids, scores.detach().float().cpu().tolist()))
+            token_ids = token_ids[:end]
+        # `generate().scores` include temperature/top-p warpers. GRPO needs
+        # raw behavior-policy probabilities for a valid importance ratio.
+        with torch.no_grad():
+            raw_logprobs = _token_logprobs(model, prefix, token_ids)
+        output_actions.append(Action(tokenizer.decode(token_ids, skip_special_tokens=True).strip(), token_ids, raw_logprobs.detach().float().cpu().tolist()))
     return output_actions
 
 
 def response_logprob(model, tokenizer, prompt: str, response_ids: list[int]):
     """Differentiable sum log P(response tokens | exact Project A chat prompt)."""
-    import torch
-    import torch.nn.functional as F
-
     prefix = _prompt_ids(tokenizer, prompt)
-    device = next(model.parameters()).device
-    ids = torch.tensor([prefix + response_ids], device=device)
-    logits = model(input_ids=ids).logits[:, :-1]
-    targets = ids[:, 1:]
-    start = len(prefix) - 1
-    selected = F.log_softmax(logits[:, start : start + len(response_ids)], dim=-1).gather(-1, targets[:, start : start + len(response_ids)].unsqueeze(-1)).squeeze(-1)
+    selected = _token_logprobs(model, prefix, response_ids)
     return selected.sum(), selected
