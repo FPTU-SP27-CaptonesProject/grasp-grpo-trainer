@@ -74,7 +74,10 @@ def main() -> None:
         if not trees:
             raise RuntimeError("No action-bearing rollouts found in the training dataset")
         leaves = [leaf for tree in trees for leaf in tree["leaves"]]
-        actor.train()
+        # Rollouts are generated with dropout disabled. Keep that same policy
+        # distribution while computing token ratios; eval mode does not disable
+        # autograd, it only disables stochastic layers such as LoRA dropout.
+        actor.eval()
         optimizer.zero_grad(set_to_none=True)
         loss, info = grpo_loss(actor, reference, tokenizer, leaves, clip_epsilon=args.clip_epsilon, kl_beta=args.kl_beta)
         loss.backward(); torch.nn.utils.clip_grad_norm_((p for p in actor.parameters() if p.requires_grad), 1.0); optimizer.step()
