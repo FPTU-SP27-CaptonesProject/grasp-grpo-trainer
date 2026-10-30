@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -57,6 +58,7 @@ def main() -> None:
     retriever = CorpusRouter(args.corpus_config, args.encoder, top_k=args.top_k, max_candidate_triples=args.max_candidate_triples) if args.corpus_config else DenseRetriever(args.index_dir, args.encoder, top_k=args.top_k, max_candidate_triples=args.max_candidate_triples, triple_cache=args.triple_cache)
     metrics = []
     example_cursor = 0
+    started_at = time.monotonic()
     for step in range(1, args.iterations + 1):
         # The actor itself generates every tree: never reuse rollout data after an update.
         environment = BinaryTreeEnvironment(actor, tokenizer, reader, retriever, branch_factor=2, max_steps=args.max_steps, max_leaves=args.max_leaves, temperature=args.temperature, top_p=args.top_p, alpha=args.alpha, retrieval_cost=args.retrieval_cost, behavior_checkpoint=f"in_memory_actor_before_step_{step}", initial_retrieval=not args.no_initial_retrieval)
@@ -81,7 +83,10 @@ def main() -> None:
         optimizer.zero_grad(set_to_none=True)
         info = grpo_backward(actor, reference, tokenizer, leaves, clip_epsilon=args.clip_epsilon, kl_beta=args.kl_beta)
         torch.nn.utils.clip_grad_norm_((p for p in actor.parameters() if p.requires_grad), 1.0); optimizer.step()
-        info.update({"step": step, "mean_reward": sum(float(x["reward"]["total"]) for x in leaves) / len(leaves), "leaves": len(leaves), "skipped_direct_answers": skipped_direct_answers})
+        elapsed_seconds = time.monotonic() - started_at
+        seconds_per_step = elapsed_seconds / step
+        eta_seconds = seconds_per_step * (args.iterations - step)
+        info.update({"step": step, "mean_reward": sum(float(x["reward"]["total"]) for x in leaves) / len(leaves), "leaves": len(leaves), "skipped_direct_answers": skipped_direct_answers, "elapsed_minutes": elapsed_seconds / 60, "seconds_per_step": seconds_per_step, "eta_hours": eta_seconds / 3600})
         metrics.append(info); print(json.dumps(info))
         if step % args.save_every == 0 or step == args.iterations:
             save_checkpoint(actor, tokenizer, output, step, args, metrics)
