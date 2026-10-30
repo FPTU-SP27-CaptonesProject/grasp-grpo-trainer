@@ -37,6 +37,10 @@ bash scripts/train_grpo_vast.sh
 `READER_GPU=0` and `TRAIN_GPU=1` target a single two-GPU Vast instance. Set `READER_URL` to the
 reader instance's mapped public URL only when the reader is hosted on a separate Vast instance.
 
+Build the three compatible SQLite triple caches from the downloaded teacher trajectories before
+training: `bash scripts/build_triple_caches_vast.sh`. Point the corpus config's `triple_cache`
+entries at `/workspace/data/grasp-triples/{2wiki,hotpotqa,wiki18}.sqlite`.
+
 ```powershell
 git clone <your-project-b-repository> grasp-grpo-trainer
 cd grasp-grpo-trainer
