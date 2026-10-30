@@ -36,6 +36,8 @@ bash scripts/train_grpo_vast.sh
 
 `READER_GPU=0` and `TRAIN_GPU=1` target a single two-GPU Vast instance. Set `READER_URL` to the
 reader instance's mapped public URL only when the reader is hosted on a separate Vast instance.
+The setup script creates a separate `READER_VENV` for vLLM because its dependency versions conflict
+with the stable Transformers/PEFT stack used by the GRPO trainer.
 
 Build the three compatible SQLite triple caches from the downloaded teacher trajectories before
 training: `bash scripts/build_triple_caches_vast.sh`. Point the corpus config's `triple_cache`
