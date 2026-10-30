@@ -24,7 +24,7 @@ def _token_logprobs(model, prefix: list[int], response_ids: list[int]):
     start = len(prefix) - 1
     return F.log_softmax(logits[:, start : start + len(response_ids)], dim=-1).gather(
         -1, targets[:, start : start + len(response_ids)].unsqueeze(-1)
-    ).squeeze(-1)
+    ).squeeze(-1).squeeze(0)
 
 
 def load_policy(checkpoint: str, *, trainable: bool, load_in_4bit: bool = False):
