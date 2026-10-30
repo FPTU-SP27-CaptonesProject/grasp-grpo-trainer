@@ -41,6 +41,17 @@ def save_checkpoint(actor, tokenizer, output: Path, step: int, args, metrics: li
     return path
 
 
+def progress_line(step: int, total: int, elapsed_seconds: float, eta_seconds: float) -> str:
+    width = 40
+    filled = int(width * step / total)
+    bar = "#" * filled + "-" * (width - filled)
+    return (
+        f"PROGRESS [{bar}] {100 * step / total:6.2f}% "
+        f"step {step}/{total} | elapsed {elapsed_seconds / 3600:.2f}h "
+        f"| ETA {eta_seconds / 3600:.2f}h"
+    )
+
+
 def main() -> None:
     args = parse_args(); torch.manual_seed(args.seed)
     if args.branch_factor != 2 or args.questions_per_iteration < 1:
@@ -87,7 +98,9 @@ def main() -> None:
         seconds_per_step = elapsed_seconds / step
         eta_seconds = seconds_per_step * (args.iterations - step)
         info.update({"step": step, "mean_reward": sum(float(x["reward"]["total"]) for x in leaves) / len(leaves), "leaves": len(leaves), "skipped_direct_answers": skipped_direct_answers, "elapsed_minutes": elapsed_seconds / 60, "seconds_per_step": seconds_per_step, "eta_hours": eta_seconds / 3600})
-        metrics.append(info); print(json.dumps(info))
+        metrics.append(info)
+        print(json.dumps(info))
+        print(progress_line(step, args.iterations, elapsed_seconds, eta_seconds), flush=True)
         if step % args.save_every == 0 or step == args.iterations:
             save_checkpoint(actor, tokenizer, output, step, args, metrics)
             write_json(output / "metrics.json", metrics)
