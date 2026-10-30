@@ -32,6 +32,7 @@ def arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--alpha", type=float, default=0.3)
     parser.add_argument("--retrieval-cost", type=float, default=0.0)
     parser.add_argument("--limit", type=int)
+    parser.add_argument("--require-proxy-actions", action="store_true", help="Skip direct reader answers until collecting requested action-bearing trees")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--load-in-4bit", action="store_true")
     parser.add_argument("--no-initial-retrieval", action="store_true")
@@ -46,8 +47,20 @@ def collect(args) -> list[dict]:
         raise ValueError("provide exactly one of --index-dir or --corpus-config")
     retriever = CorpusRouter(args.corpus_config, args.encoder, top_k=args.top_k, max_candidate_triples=args.max_candidate_triples) if args.corpus_config else DenseRetriever(args.index_dir, args.encoder, top_k=args.top_k, max_candidate_triples=args.max_candidate_triples, triple_cache=args.triple_cache)
     env = BinaryTreeEnvironment(actor, tokenizer, reader, retriever, branch_factor=args.branch_factor, max_steps=args.max_steps, max_leaves=args.max_leaves, temperature=args.temperature, top_p=args.top_p, alpha=args.alpha, retrieval_cost=args.retrieval_cost, behavior_checkpoint=str(Path(args.checkpoint).resolve()), initial_retrieval=not args.no_initial_retrieval)
-    examples = read_examples(args.qa)[: args.limit] if args.limit else read_examples(args.qa)
-    trees = [env.run(example) for example in examples]
+    examples = read_examples(args.qa)
+    trees = []
+    skipped_direct_answers = 0
+    for example in examples:
+        tree = env.run(example)
+        has_actions = any(leaf["actions"] for leaf in tree["leaves"])
+        if args.require_proxy_actions and not has_actions:
+            skipped_direct_answers += 1
+            continue
+        trees.append(tree)
+        if args.limit is not None and len(trees) >= args.limit:
+            break
+    if not trees:
+        raise RuntimeError("No rollout tree matched the requested criteria")
     retriever.close()
     return trees
 

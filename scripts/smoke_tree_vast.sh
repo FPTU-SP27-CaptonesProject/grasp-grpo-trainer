@@ -9,5 +9,6 @@ CUDA_VISIBLE_DEVICES="$TRAIN_GPU" grasp-grpo-rollout \
   --checkpoint "$SFT_CHECKPOINT" --qa "$QA_FILE" --corpus-config "$CORPUS_CONFIG" \
   --reader-url "$READER_URL" --reader-api-key "$READER_API_KEY" --reader-model "$READER_MODEL" \
   --output "$OUTPUT_DIR/smoke-tree.json" --limit 1 \
+  --require-proxy-actions \
   --branch-factor "$BRANCH_FACTOR" --max-steps "$MAX_STEPS" --max-leaves "$MAX_LEAVES" \
   --load-in-4bit

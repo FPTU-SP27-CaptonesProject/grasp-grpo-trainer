@@ -56,17 +56,29 @@ def main() -> None:
     reader = OpenAIReader(args.reader_url, args.reader_api_key, args.reader_model)
     retriever = CorpusRouter(args.corpus_config, args.encoder, top_k=args.top_k, max_candidate_triples=args.max_candidate_triples) if args.corpus_config else DenseRetriever(args.index_dir, args.encoder, top_k=args.top_k, max_candidate_triples=args.max_candidate_triples, triple_cache=args.triple_cache)
     metrics = []
+    example_cursor = 0
     for step in range(1, args.iterations + 1):
-        batch = [examples[(step - 1 + i) % len(examples)] for i in range(args.questions_per_iteration)]
         # The actor itself generates every tree: never reuse rollout data after an update.
         environment = BinaryTreeEnvironment(actor, tokenizer, reader, retriever, branch_factor=2, max_steps=args.max_steps, max_leaves=args.max_leaves, temperature=args.temperature, top_p=args.top_p, alpha=args.alpha, retrieval_cost=args.retrieval_cost, behavior_checkpoint=f"in_memory_actor_before_step_{step}", initial_retrieval=not args.no_initial_retrieval)
-        trees = [environment.run(example) for example in batch]
+        trees = []
+        skipped_direct_answers = 0
+        # A direct reader answer has no policy tokens and cannot produce a GRPO update.
+        while len(trees) < args.questions_per_iteration and skipped_direct_answers < len(examples):
+            example = examples[example_cursor % len(examples)]
+            example_cursor += 1
+            tree = environment.run(example)
+            if any(leaf["actions"] for leaf in tree["leaves"]):
+                trees.append(tree)
+            else:
+                skipped_direct_answers += 1
+        if not trees:
+            raise RuntimeError("No action-bearing rollouts found in the training dataset")
         leaves = [leaf for tree in trees for leaf in tree["leaves"]]
         actor.train()
         optimizer.zero_grad(set_to_none=True)
         loss, info = grpo_loss(actor, reference, tokenizer, leaves, clip_epsilon=args.clip_epsilon, kl_beta=args.kl_beta)
         loss.backward(); torch.nn.utils.clip_grad_norm_((p for p in actor.parameters() if p.requires_grad), 1.0); optimizer.step()
-        info.update({"step": step, "mean_reward": sum(float(x["reward"]["total"]) for x in leaves) / len(leaves), "leaves": len(leaves)})
+        info.update({"step": step, "mean_reward": sum(float(x["reward"]["total"]) for x in leaves) / len(leaves), "leaves": len(leaves), "skipped_direct_answers": skipped_direct_answers})
         metrics.append(info); print(json.dumps(info))
         if step % args.save_every == 0 or step == args.iterations:
             save_checkpoint(actor, tokenizer, output, step, args, metrics)
