@@ -11,7 +11,7 @@ import torch
 
 from .data import read_examples, write_json
 from .environment import BinaryTreeEnvironment
-from .grpo import grpo_loss
+from .grpo import grpo_backward
 from .model import load_policy
 from .reader import OpenAIReader
 from .retrieval import CorpusRouter, DenseRetriever
@@ -79,8 +79,8 @@ def main() -> None:
         # autograd, it only disables stochastic layers such as LoRA dropout.
         actor.eval()
         optimizer.zero_grad(set_to_none=True)
-        loss, info = grpo_loss(actor, reference, tokenizer, leaves, clip_epsilon=args.clip_epsilon, kl_beta=args.kl_beta)
-        loss.backward(); torch.nn.utils.clip_grad_norm_((p for p in actor.parameters() if p.requires_grad), 1.0); optimizer.step()
+        info = grpo_backward(actor, reference, tokenizer, leaves, clip_epsilon=args.clip_epsilon, kl_beta=args.kl_beta)
+        torch.nn.utils.clip_grad_norm_((p for p in actor.parameters() if p.requires_grad), 1.0); optimizer.step()
         info.update({"step": step, "mean_reward": sum(float(x["reward"]["total"]) for x in leaves) / len(leaves), "leaves": len(leaves), "skipped_direct_answers": skipped_direct_answers})
         metrics.append(info); print(json.dumps(info))
         if step % args.save_every == 0 or step == args.iterations:

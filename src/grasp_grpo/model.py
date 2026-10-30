@@ -43,20 +43,30 @@ def load_policy(checkpoint: str, *, trainable: bool, load_in_4bit: bool = False)
     return model, tokenizer, str(config.base_model_name_or_path)
 
 
+def _prompt_ids(tokenizer, prompt: str, max_input_tokens: int = 3072, prompt_head_tokens: int = 768) -> list[int]:
+    rendered = tokenizer.apply_chat_template([{"role": "user", "content": prompt}], tokenize=False, add_generation_prompt=True)
+    ids = tokenizer(rendered, add_special_tokens=False).input_ids
+    if len(ids) <= max_input_tokens:
+        return ids
+    head = min(prompt_head_tokens, max_input_tokens // 2)
+    return ids[:head] + ids[-(max_input_tokens - head):]
+
+
 def generate(model, tokenizer, prompt: str, *, samples: int, max_new_tokens: int, temperature: float, top_p: float) -> list[Action]:
     import torch
 
     if samples > 1 and temperature <= 0:
         raise ValueError("multiple tree branches require temperature > 0")
-    rendered = tokenizer.apply_chat_template([{"role": "user", "content": prompt}], tokenize=False, add_generation_prompt=True)
-    inputs = tokenizer(rendered, return_tensors="pt", add_special_tokens=False).to(next(model.parameters()).device)
+    prefix = _prompt_ids(tokenizer, prompt)
+    device = next(model.parameters()).device
+    inputs = {"input_ids": torch.tensor([prefix], device=device), "attention_mask": torch.ones((1, len(prefix)), device=device, dtype=torch.long)}
     generation = {"do_sample": temperature > 0, "max_new_tokens": max_new_tokens, "num_return_sequences": samples, "pad_token_id": tokenizer.pad_token_id, "eos_token_id": tokenizer.eos_token_id, "return_dict_in_generate": True, "output_scores": True}
     if temperature > 0:
         generation.update(temperature=temperature, top_p=top_p)
     with torch.no_grad():
         output = model.generate(**inputs, **generation)
         transition = model.compute_transition_scores(output.sequences, output.scores, normalize_logits=True)
-    width = inputs.input_ids.shape[1]
+    width = inputs["input_ids"].shape[1]
     output_actions = []
     for i, ids in enumerate(output.sequences[:, width:]):
         scores = transition[i, : ids.shape[0]]
@@ -74,8 +84,7 @@ def response_logprob(model, tokenizer, prompt: str, response_ids: list[int]):
     import torch
     import torch.nn.functional as F
 
-    rendered = tokenizer.apply_chat_template([{"role": "user", "content": prompt}], tokenize=False, add_generation_prompt=True)
-    prefix = tokenizer(rendered, add_special_tokens=False).input_ids
+    prefix = _prompt_ids(tokenizer, prompt)
     device = next(model.parameters()).device
     ids = torch.tensor([prefix + response_ids], device=device)
     logits = model(input_ids=ids).logits[:, :-1]
