@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "grasp-grpo-trainer"
+version = "0.1.0"
+description = "Standalone binary-tree GRPO trainer for the GRASP proxy."
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+  "accelerate>=1.4,<2",
+  "numpy>=1.26",
+  "peft>=0.14,<1",
+  "torch>=2.4,<3",
+  "transformers>=4.51,<5",
+]
+
+[project.optional-dependencies]
+rollout = ["faiss-cpu>=1.9", "openai>=1.68", "sentence-transformers>=3.4"]
+quantization = ["bitsandbytes>=0.45"]
+dev = ["pytest>=8.3", "ruff>=0.11"]
+
+[project.scripts]
+grasp-grpo-validate = "grasp_grpo.validate:main"
+grasp-grpo-rollout = "grasp_grpo.rollout:main"
+grasp-train-grpo = "grasp_grpo.train:main"
+grasp-grpo-chat = "grasp_grpo.chat:main"
+grasp-evaluate = "grasp_grpo.evaluate:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
