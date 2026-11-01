@@ -26,5 +26,8 @@ CUDA_VISIBLE_DEVICES="$TRAIN_GPU" grasp-train-grpo \
   --reader-url "$READER_URL" --reader-api-key "$READER_API_KEY" --reader-model "$READER_MODEL" \
   --output-dir "$OUTPUT_DIR" --iterations "$ITERATIONS" --questions-per-iteration "$QUESTIONS_PER_ITERATION" \
   --branch-factor "$BRANCH_FACTOR" --max-steps "$MAX_STEPS" --max-leaves "$MAX_LEAVES" \
+  --alpha "${ALPHA:-0.3}" --retrieval-cost "${RETRIEVAL_COST:-0.0}" \
+  --rd-gain-weight "${RD_GAIN_WEIGHT:-0.3}" --qf-gain-weight "${QF_GAIN_WEIGHT:-0.7}" \
+  --ki-hit-weight "${KI_HIT_WEIGHT:-0.3}" --ki-miss-penalty "${KI_MISS_PENALTY:-0.1}" \
   --learning-rate "$LEARNING_RATE" --clip-epsilon "$CLIP_EPSILON" --kl-beta "$KL_BETA" \
   --save-every "$SAVE_EVERY" --load-in-4bit

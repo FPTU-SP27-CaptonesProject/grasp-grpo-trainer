@@ -31,6 +31,10 @@ def arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--alpha", type=float, default=0.3)
     parser.add_argument("--retrieval-cost", type=float, default=0.0)
+    parser.add_argument("--rd-gain-weight", type=float, default=0.3)
+    parser.add_argument("--qf-gain-weight", type=float, default=0.7)
+    parser.add_argument("--ki-hit-weight", type=float, default=0.3)
+    parser.add_argument("--ki-miss-penalty", type=float, default=0.1)
     parser.add_argument("--limit", type=int)
     parser.add_argument("--require-proxy-actions", action="store_true", help="Skip direct reader answers until collecting requested action-bearing trees")
     parser.add_argument("--seed", type=int, default=42)
@@ -46,7 +50,7 @@ def collect(args) -> list[dict]:
     if bool(args.index_dir) == bool(args.corpus_config):
         raise ValueError("provide exactly one of --index-dir or --corpus-config")
     retriever = CorpusRouter(args.corpus_config, args.encoder, top_k=args.top_k, max_candidate_triples=args.max_candidate_triples) if args.corpus_config else DenseRetriever(args.index_dir, args.encoder, top_k=args.top_k, max_candidate_triples=args.max_candidate_triples, triple_cache=args.triple_cache)
-    env = BinaryTreeEnvironment(actor, tokenizer, reader, retriever, branch_factor=args.branch_factor, max_steps=args.max_steps, max_leaves=args.max_leaves, temperature=args.temperature, top_p=args.top_p, alpha=args.alpha, retrieval_cost=args.retrieval_cost, behavior_checkpoint=str(Path(args.checkpoint).resolve()), initial_retrieval=not args.no_initial_retrieval)
+    env = BinaryTreeEnvironment(actor, tokenizer, reader, retriever, branch_factor=args.branch_factor, max_steps=args.max_steps, max_leaves=args.max_leaves, temperature=args.temperature, top_p=args.top_p, alpha=args.alpha, retrieval_cost=args.retrieval_cost, behavior_checkpoint=str(Path(args.checkpoint).resolve()), initial_retrieval=not args.no_initial_retrieval, rd_gain_weight=args.rd_gain_weight, qf_gain_weight=args.qf_gain_weight, ki_hit_weight=args.ki_hit_weight, ki_miss_penalty=args.ki_miss_penalty)
     examples = read_examples(args.qa)
     trees = []
     skipped_direct_answers = 0

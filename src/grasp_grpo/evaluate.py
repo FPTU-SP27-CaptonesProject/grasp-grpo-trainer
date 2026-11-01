@@ -43,7 +43,14 @@ def main() -> None:
         rows.append({"id": item["id"], "f1": f1(prediction, item["gold_answers"]), "em": exact(prediction, item["gold_answers"])})
     if not rows:
         raise ValueError("no evaluation rows")
-    report = {"questions": len(rows), "missing_predictions": sum(x["id"] not in by_id for x in read_examples(args.qa)), "f1": sum(x["f1"] for x in rows) / len(rows), "em": sum(x["em"] for x in rows) / len(rows), "per_question": rows}
+    examples = read_examples(args.qa)
+    contexts = {str(item.get("id", item.get("question_id"))): {str(doc_id) for doc_id in item.get("context_doc_ids", [])} for item in predictions}
+    recall_rows = []
+    for item in examples:
+        gold_ids = set(item["gold_doc_ids"])
+        if gold_ids:
+            recall_rows.append(len(gold_ids & contexts.get(item["id"], set())) / len(gold_ids))
+    report = {"questions": len(rows), "missing_predictions": sum(x["id"] not in by_id for x in examples), "missing_context_ids": sum(x["id"] not in contexts for x in examples), "f1": sum(x["f1"] for x in rows) / len(rows), "em": sum(x["em"] for x in rows) / len(rows), "context_recall": sum(recall_rows) / len(recall_rows) if recall_rows else None, "context_recall_questions": len(recall_rows), "per_question": rows}
     write_json(args.output, report)
     print(json.dumps({key: value for key, value in report.items() if key != "per_question"}))
 

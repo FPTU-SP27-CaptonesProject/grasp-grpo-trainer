@@ -29,6 +29,7 @@ def parse_args():
     p.add_argument("--learning-rate", type=float, default=5e-7); p.add_argument("--clip-epsilon", type=float, default=0.2); p.add_argument("--kl-beta", type=float, default=0.002)
     p.add_argument("--branch-factor", type=int, default=2); p.add_argument("--max-steps", type=int, default=3); p.add_argument("--max-leaves", type=int, default=4)
     p.add_argument("--temperature", type=float, default=0.7); p.add_argument("--top-p", type=float, default=0.95); p.add_argument("--top-k", type=int, default=10); p.add_argument("--max-candidate-triples", type=int, default=20); p.add_argument("--alpha", type=float, default=0.3); p.add_argument("--retrieval-cost", type=float, default=0.0)
+    p.add_argument("--rd-gain-weight", type=float, default=0.3); p.add_argument("--qf-gain-weight", type=float, default=0.7); p.add_argument("--ki-hit-weight", type=float, default=0.3); p.add_argument("--ki-miss-penalty", type=float, default=0.1)
     p.add_argument("--save-every", type=int, default=10); p.add_argument("--seed", type=int, default=42); p.add_argument("--load-in-4bit", action="store_true"); p.add_argument("--no-initial-retrieval", action="store_true")
     return p.parse_args()
 
@@ -37,7 +38,7 @@ def save_checkpoint(actor, tokenizer, output: Path, step: int, args, metrics: li
     path = output / f"checkpoint-grpo-step-{step:06d}"
     path.mkdir(parents=True, exist_ok=True)
     actor.save_pretrained(path); tokenizer.save_pretrained(path)
-    write_json(path / "grpo_config.json", {"sft_checkpoint": str(Path(args.sft_checkpoint).resolve()), "created_at_utc": datetime.now(UTC).isoformat(), "tree": {"branch_factor": args.branch_factor, "max_steps": args.max_steps, "max_leaves": args.max_leaves}, "grpo": {"learning_rate": args.learning_rate, "clip_epsilon": args.clip_epsilon, "kl_beta": args.kl_beta}, "metrics": metrics[-50:]})
+    write_json(path / "grpo_config.json", {"sft_checkpoint": str(Path(args.sft_checkpoint).resolve()), "created_at_utc": datetime.now(UTC).isoformat(), "tree": {"branch_factor": args.branch_factor, "max_steps": args.max_steps, "max_leaves": args.max_leaves}, "reward": {"alpha": args.alpha, "retrieval_cost": args.retrieval_cost, "rd_gain_weight": args.rd_gain_weight, "qf_gain_weight": args.qf_gain_weight, "ki_hit_weight": args.ki_hit_weight, "ki_miss_penalty": args.ki_miss_penalty}, "grpo": {"learning_rate": args.learning_rate, "clip_epsilon": args.clip_epsilon, "kl_beta": args.kl_beta}, "metrics": metrics[-50:]})
     return path
 
 
@@ -64,7 +65,7 @@ def main() -> None:
     progress = tqdm(total=args.iterations, desc="GRPO", unit="step", dynamic_ncols=True)
     for step in range(1, args.iterations + 1):
         # The actor itself generates every tree: never reuse rollout data after an update.
-        environment = BinaryTreeEnvironment(actor, tokenizer, reader, retriever, branch_factor=2, max_steps=args.max_steps, max_leaves=args.max_leaves, temperature=args.temperature, top_p=args.top_p, alpha=args.alpha, retrieval_cost=args.retrieval_cost, behavior_checkpoint=f"in_memory_actor_before_step_{step}", initial_retrieval=not args.no_initial_retrieval)
+        environment = BinaryTreeEnvironment(actor, tokenizer, reader, retriever, branch_factor=2, max_steps=args.max_steps, max_leaves=args.max_leaves, temperature=args.temperature, top_p=args.top_p, alpha=args.alpha, retrieval_cost=args.retrieval_cost, behavior_checkpoint=f"in_memory_actor_before_step_{step}", initial_retrieval=not args.no_initial_retrieval, rd_gain_weight=args.rd_gain_weight, qf_gain_weight=args.qf_gain_weight, ki_hit_weight=args.ki_hit_weight, ki_miss_penalty=args.ki_miss_penalty)
         trees = []
         skipped_direct_answers = 0
         # A direct reader answer has no policy tokens and cannot produce a GRPO update.
@@ -89,7 +90,7 @@ def main() -> None:
         elapsed_seconds = time.monotonic() - started_at
         seconds_per_step = elapsed_seconds / step
         eta_seconds = seconds_per_step * (args.iterations - step)
-        info.update({"step": step, "mean_reward": sum(float(x["reward"]["total"]) for x in leaves) / len(leaves), "leaves": len(leaves), "skipped_direct_answers": skipped_direct_answers, "elapsed_minutes": elapsed_seconds / 60, "seconds_per_step": seconds_per_step, "eta_hours": eta_seconds / 3600})
+        info.update({"step": step, "mean_reward": sum(float(x["reward"]["total"]) for x in leaves) / len(leaves), "mean_answer_f1": sum(float(x["reward"]["answer_f1"]) for x in leaves) / len(leaves), "mean_context_recall": sum(float(x["reward"]["context_recall"] or 0.0) for x in leaves) / len(leaves), "mean_action_shaping": sum(float(x["reward"]["action_shaping"]) for x in leaves) / len(leaves), "leaves": len(leaves), "skipped_direct_answers": skipped_direct_answers, "elapsed_minutes": elapsed_seconds / 60, "seconds_per_step": seconds_per_step, "eta_hours": eta_seconds / 3600})
         metrics.append(info)
         tqdm.write(json.dumps(info))
         progress.set_postfix(loss=f"{info['loss']:.5f}", reward=f"{info['mean_reward']:.3f}", eta=f"{info['eta_hours']:.2f}h")

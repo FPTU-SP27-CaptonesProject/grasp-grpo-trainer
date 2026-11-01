@@ -169,3 +169,24 @@ grasp-evaluate --qa data/hotpotqa_test.jsonl --predictions outputs/dense_rag_pre
 
 For paper-grade comparison, retain the benchmark-specific evaluator for ASQA ROUGE and any official
 HotPotQA/TriviaQA normalization; this generic evaluator reports F1 and EM only.
+
+## Checkpoint evaluation
+
+Use deterministic sequential inference for checkpoint selection. Gold document IDs are read only by
+the evaluator after predictions are produced; they are never exposed to the proxy or reader.
+
+```bash
+CUDA_VISIBLE_DEVICES=1 grasp-infer \
+  --checkpoint /workspace/checkpoints/grasp-qwen2.5-3b-sft \
+  --qa /workspace/data/grasp-gold-evidence/dev.jsonl \
+  --corpus-config /workspace/configs/corpora.json \
+  --reader-url http://127.0.0.1:8000/v1 --reader-api-key "$READER_API_KEY" \
+  --reader-model Qwen/Qwen2.5-7B-Instruct \
+  --output /workspace/outputs/eval/sft-dev-predictions.json --load-in-4bit
+grasp-evaluate --qa /workspace/data/grasp-gold-evidence/dev.jsonl \
+  --predictions /workspace/outputs/eval/sft-dev-predictions.json \
+  --output /workspace/outputs/eval/sft-dev-metrics.json
+```
+
+Repeat with each GRPO checkpoint and select by dev F1 and context recall before touching the test
+split.
