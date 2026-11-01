@@ -29,6 +29,7 @@ grasp-train-grpo = "grasp_grpo.train:main"
 grasp-grpo-chat = "grasp_grpo.chat:main"
 grasp-evaluate = "grasp_grpo.evaluate:main"
 grasp-build-triple-cache = "grasp_grpo.build_triple_cache:main"
+grasp-build-gold-qa = "grasp_grpo.build_gold_qa:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

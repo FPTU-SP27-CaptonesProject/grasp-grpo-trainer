@@ -43,6 +43,33 @@ Build the three compatible SQLite triple caches from the downloaded teacher traj
 training: `bash scripts/build_triple_caches_vast.sh`. Point the corpus config's `triple_cache`
 entries at `/workspace/data/grasp-triples/{2wiki,hotpotqa,wiki18}.sqlite`.
 
+## Gold-evidence GRPO data
+
+For recall-aware GRPO, enrich the QA rows with `gold_doc_ids`. These IDs are used only by the
+reward after rollout, never inserted into an actor or reader prompt. `grasp-build-gold-qa` accepts
+one SPARKLE-style benchmark annotation file per corpus. An annotation record must contain a
+question, answers, and either `gold_ctxs` (with an `id` or `doc_id`) or supporting-fact titles.
+It verifies every resolved ID against the target corpus `passages.sqlite`, excludes unresolved or
+ambiguous rows, and writes an audit report.
+
+```bash
+grasp-build-gold-qa \
+  --qa /workspace/data/grpo_train_mixed_shuffled.jsonl \
+  --corpus-config /workspace/configs/corpora.json \
+  --gold-source 2wiki_ircot=/workspace/data/grasp-gold/raw/2wiki/train.json \
+  --gold-source hotpotqa_abstracts_2017=/workspace/data/grasp-gold/raw/hotpotqa/train.json \
+  --gold-source wiki18=/workspace/data/grasp-gold/raw/nq/train.json \
+  --output /workspace/data/grpo_train_with_gold.jsonl \
+  --report /workspace/data/grpo_train_with_gold.report.json \
+  --split train
+```
+
+Run the same command with a held-out QA file and source dev annotations to create
+`grpo_dev_with_gold.jsonl`. Do not use unresolved rows as F1-only training examples. Review the
+report and require `rows_written`/coverage to be acceptable and every mapped ID to be valid before
+starting GRPO. With gold IDs available, set `ALPHA=0.7` to use the SPARKLE-like mixture
+`0.3 * answer_F1 + 0.7 * context_recall`.
+
 ```powershell
 git clone <your-project-b-repository> grasp-grpo-trainer
 cd grasp-grpo-trainer
