@@ -70,6 +70,18 @@ report and require `rows_written`/coverage to be acceptable and every mapped ID 
 starting GRPO. With gold IDs available, set `ALPHA=0.7` to use the SPARKLE-like mixture
 `0.3 * answer_F1 + 0.7 * context_recall`.
 
+When the dev annotation itself contains questions, answers and `gold_ctxs`, create a canonical
+evaluation file directly rather than first converting it by hand:
+
+```bash
+grasp-build-gold-qa --from-gold \
+  --corpus-config /workspace/configs/corpora.json \
+  --gold-source 2wiki_ircot=/workspace/data/grasp-gold/raw/2wiki/dev.json \
+  --gold-source hotpotqa_abstracts_2017=/workspace/data/grasp-gold/raw/hotpotqa/dev.json \
+  --gold-source wiki18=/workspace/data/grasp-gold/raw/nq/dev.json \
+  --output /workspace/data/grpo_dev_with_gold.jsonl --split dev
+```
+
 ```powershell
 git clone <your-project-b-repository> grasp-grpo-trainer
 cd grasp-grpo-trainer

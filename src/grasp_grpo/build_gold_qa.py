@@ -175,7 +175,9 @@ def write_jsonl(path: str | Path, rows: list[dict[str, Any]]) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Enrich GRPO QA rows with verified gold_doc_ids")
-    parser.add_argument("--qa", required=True, help="Existing GRPO JSONL/JSON to enrich")
+    input_mode = parser.add_mutually_exclusive_group(required=True)
+    input_mode.add_argument("--qa", help="Existing GRPO JSONL/JSON to enrich")
+    input_mode.add_argument("--from-gold", action="store_true", help="Create canonical QA rows directly from --gold-source annotations")
     parser.add_argument("--corpus-config", required=True, help="JSON mapping dataset to index_dir")
     parser.add_argument("--gold-source", action="append", required=True, metavar="DATASET=PATH", help="Processed benchmark annotations; repeat once per corpus")
     parser.add_argument("--output", required=True)
@@ -193,7 +195,21 @@ def main() -> None:
     counters: dict[str, Counter[str]] = defaultdict(Counter)
     samples: dict[str, list[dict[str, str]]] = defaultdict(list)
 
-    for row in read_examples(args.qa):
+    if args.qa:
+        input_rows = read_examples(args.qa)
+    else:
+        input_rows = []
+        for dataset, records in source_rows.items():
+            for index, record in enumerate(records):
+                question = str(record.get("question", "")).strip()
+                gold_answers = answers(record)
+                identifier = source_id(record)
+                if question and gold_answers and identifier:
+                    input_rows.append({"id": f"{dataset}::{identifier}", "question": question, "gold_answers": gold_answers, "metadata": {"dataset": dataset}, "_source": record})
+                else:
+                    counters[dataset]["invalid_source_row"] += 1
+
+    for row in input_rows:
         dataset = str(row["metadata"].get("dataset", ""))
         counters[dataset]["total"] += 1
         if dataset not in source_indexes:
@@ -203,7 +219,11 @@ def main() -> None:
         else:
             if dataset not in lookups:
                 lookups[dataset] = corpus_lookup(str(config[dataset]["index_dir"]))
-            source, status = choose_source(row, *source_indexes[dataset])
+            source = row.get("_source") if args.from_gold else None
+            if source is not None:
+                status = "source_row"
+            else:
+                source, status = choose_source(row, *source_indexes[dataset])
             if source is not None:
                 ids, status = resolve_ids(source, *lookups[dataset])
                 if ids is not None:
@@ -216,7 +236,7 @@ def main() -> None:
             samples[dataset].append({"id": row["id"], "question": row["question"], "status": status})
 
     report = {
-        "input": str(Path(args.qa).resolve()),
+        "input": "--from-gold" if args.from_gold else str(Path(args.qa).resolve()),
         "output": str(Path(args.output).resolve()),
         "rows_written": len(output),
         "datasets": {

@@ -54,3 +54,21 @@ def test_build_gold_qa_maps_ids_and_supporting_titles(tmp_path, monkeypatch):
     assert [row["gold_doc_ids"] for row in rows] == [["doc-a"], ["doc-b"]]
     report = json.loads((tmp_path / "output.jsonl.report.json").read_text(encoding="utf-8"))
     assert report["datasets"]["demo"]["mapped"] == 2
+
+
+def test_build_gold_qa_creates_canonical_rows_from_annotations(tmp_path, monkeypatch):
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    database = sqlite3.connect(corpus / "passages.sqlite")
+    database.execute("CREATE TABLE passages (row INTEGER, doc_id TEXT, title TEXT, text TEXT)")
+    database.execute("INSERT INTO passages VALUES (0, 'doc-a', 'Alpha', 'text')")
+    database.commit()
+    database.close()
+    config = tmp_path / "corpora.json"
+    config.write_text(json.dumps({"demo": {"index_dir": str(corpus)}}), encoding="utf-8")
+    source = tmp_path / "dev.json"
+    source.write_text(json.dumps([{"id": "dev-1", "question": "Question?", "answers": ["answer"], "gold_ctxs": [{"id": "doc-a"}]}]), encoding="utf-8")
+    output = tmp_path / "dev.jsonl"
+    monkeypatch.setattr(sys, "argv", ["grasp-build-gold-qa", "--from-gold", "--corpus-config", str(config), "--gold-source", f"demo={source}", "--output", str(output), "--split", "dev"])
+    main()
+    assert json.loads(output.read_text(encoding="utf-8")) == {"id": "demo::dev-1", "dataset": "demo", "split": "dev", "question": "Question?", "gold_answers": ["answer"], "gold_doc_ids": ["doc-a"]}
