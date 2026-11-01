@@ -12,7 +12,9 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 source "$VENV_DIR/bin/activate"
 python -m pip install --upgrade pip
 python -m pip install -e "$PROJECT_DIR[rollout,quantization]"
-python -m pip install -U huggingface_hub
+# Keep the trainer compatible with the pinned Transformers/PEFT stack. The
+# vLLM reader has its own environment below and may use a newer Hub client.
+python -m pip install "huggingface_hub>=0.34,<1.0"
 
 # vLLM requires a newer Transformers stack than the GRPO trainer. Keep its
 # reader service isolated so installing either environment cannot downgrade the other.
