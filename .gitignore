@@ -6,3 +6,4 @@ outputs/
 checkpoints/
 wandb/
 config/vast.env
+.venv/
