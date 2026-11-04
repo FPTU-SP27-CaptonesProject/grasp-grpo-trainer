@@ -31,6 +31,9 @@ grasp-evaluate = "grasp_grpo.evaluate:main"
 grasp-build-triple-cache = "grasp_grpo.build_triple_cache:main"
 grasp-build-gold-qa = "grasp_grpo.build_gold_qa:main"
 grasp-infer = "grasp_grpo.infer:main"
+grasp-make-eval-ids = "grasp_grpo.eval_ids:main"
+grasp-eval-policy = "grasp_grpo.policy_eval:main"
+grasp-stage-gate = "grasp_grpo.stage_gate:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
