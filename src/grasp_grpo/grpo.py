@@ -1,52 +1,59 @@
-"""Token-level clipped GRPO objective; no critic/value model is used."""
+"""Token-level clipped GRPO objective (DAPO aggregation, clip-higher, k3 KL); no critic."""
 from __future__ import annotations
 
 import torch
 
-from .model import response_logprob
+from .model import response_logprob_entropy
 
 
-def grpo_loss(actor, reference, tokenizer, leaves: list[dict], *, clip_epsilon: float, kl_beta: float) -> tuple[torch.Tensor, dict[str, float]]:
-    losses, ratios, kls = [], [], []
+def merge_actions(leaves: list[dict]) -> list[tuple[dict, float]]:
+    """One entry per distinct action; an action shared by several leaves gets their summed advantage.
+
+    Every action is scored once per rollout batch and followed by a single optimizer step, so all
+    ratios start at 1 and summing the advantages equals scoring the action once per leaf.
+    """
+    merged: dict[int, list] = {}
     for leaf in leaves:
-        advantage = torch.tensor(float(leaf["advantage"]), device=next(actor.parameters()).device)
         for action in leaf["actions"]:
-            old = torch.tensor(float(action["old_logprob_sum"]), device=advantage.device)
-            current, _ = response_logprob(actor, tokenizer, action["prompt"], action["response_token_ids"])
-            with torch.no_grad():
-                ref, _ = response_logprob(reference, tokenizer, action["prompt"], action["response_token_ids"])
-            ratio = torch.exp(torch.clamp(current - old, -20, 20))
-            surrogate = torch.minimum(ratio * advantage, torch.clamp(ratio, 1 - clip_epsilon, 1 + clip_epsilon) * advantage)
-            # Sampled-action KL estimator, bounded below for numerical stability.
-            kl = torch.clamp(current - ref, min=0.0)
-            losses.append(-surrogate + kl_beta * kl)
-            ratios.append(ratio.detach())
-            kls.append(kl.detach())
-    if not losses:
-        raise ValueError("tree batch has no proxy actions")
-    loss = torch.stack(losses).mean()
-    return loss, {"loss": float(loss.detach()), "ratio": float(torch.stack(ratios).mean()), "kl": float(torch.stack(kls).mean()), "action_count": float(len(losses))}
+            entry = merged.setdefault(id(action), [action, 0.0])
+            entry[1] += float(leaf["advantage"])
+    return [(action, advantage) for action, advantage in merged.values()]
 
 
-def grpo_backward(actor, reference, tokenizer, leaves: list[dict], *, clip_epsilon: float, kl_beta: float) -> dict[str, float]:
-    """Backpropagate one policy action at a time to bound activation memory."""
-    entries = [(float(leaf["advantage"]), action) for leaf in leaves for action in leaf["actions"]]
+def token_loss(logp: torch.Tensor, old: torch.Tensor, ref: torch.Tensor, advantage: torch.Tensor, *, clip_low: float, clip_high: float, kl_beta: float) -> tuple[torch.Tensor, dict[str, float]]:
+    """Summed (not averaged) per-token loss of one action; the caller divides by the batch token count."""
+    ratio = torch.exp(torch.clamp(logp - old, -20, 20))
+    unclipped = ratio * advantage
+    clipped = torch.clamp(ratio, 1 - clip_low, 1 + clip_high) * advantage
+    surrogate = torch.minimum(unclipped, clipped)
+    log_ratio_ref = ref - logp
+    kl = torch.exp(log_ratio_ref) - log_ratio_ref - 1  # k3 estimator, >= 0
+    loss = (-surrogate + kl_beta * kl).sum()
+    with torch.no_grad():
+        outside = ((ratio < 1 - clip_low) | (ratio > 1 + clip_high)).sum()
+    return loss, {"ratio_sum": float(ratio.detach().sum()), "clipped": float(outside), "kl_sum": float(kl.detach().sum())}
+
+
+def grpo_backward(actor, reference, tokenizer, leaves: list[dict], *, clip_low: float, clip_high: float, kl_beta: float) -> dict[str, float]:
+    """Backpropagate one action at a time (bounded activation memory); loss = sum over tokens / batch tokens."""
+    entries = merge_actions(leaves)
     if not entries:
         raise ValueError("tree batch has no proxy actions")
-    ratios, kls, losses = [], [], []
+    total_tokens = sum(len(action["response_token_ids"]) for action, _ in entries)
+    if total_tokens == 0:
+        raise ValueError("tree batch has no response tokens")
     device = next(actor.parameters()).device
-    for advantage_value, action in entries:
-        advantage = torch.tensor(advantage_value, device=device)
-        old = torch.tensor(float(action["old_logprob_sum"]), device=device)
-        current, _ = response_logprob(actor, tokenizer, action["prompt"], action["response_token_ids"])
+    sums = {"loss": 0.0, "ratio": 0.0, "clipped": 0.0, "kl": 0.0, "entropy": 0.0}
+    for action, advantage in entries:
+        logp, entropy = response_logprob_entropy(actor, tokenizer, action["prompt"], action["response_token_ids"])
         with torch.no_grad():
-            ref, _ = response_logprob(reference, tokenizer, action["prompt"], action["response_token_ids"])
-        ratio = torch.exp(torch.clamp(current - old, -20, 20))
-        surrogate = torch.minimum(ratio * advantage, torch.clamp(ratio, 1 - clip_epsilon, 1 + clip_epsilon) * advantage)
-        kl = torch.clamp(current - ref, min=0.0)
-        action_loss = -surrogate + kl_beta * kl
-        (action_loss / len(entries)).backward()
-        ratios.append(float(ratio.detach()))
-        kls.append(float(kl.detach()))
-        losses.append(float(action_loss.detach()))
-    return {"loss": sum(losses) / len(losses), "ratio": sum(ratios) / len(ratios), "kl": sum(kls) / len(kls), "action_count": float(len(entries))}
+            ref, _ = response_logprob_entropy(reference, tokenizer, action["prompt"], action["response_token_ids"])
+        old = torch.tensor(action["old_token_logprobs"], device=device, dtype=logp.dtype)
+        loss, stats = token_loss(logp, old, ref, torch.tensor(advantage, device=device, dtype=logp.dtype), clip_low=clip_low, clip_high=clip_high, kl_beta=kl_beta)
+        (loss / total_tokens).backward()
+        sums["loss"] += float(loss.detach())
+        sums["ratio"] += stats["ratio_sum"]
+        sums["clipped"] += stats["clipped"]
+        sums["kl"] += stats["kl_sum"]
+        sums["entropy"] += float(entropy.detach().sum())
+    return {"loss": sums["loss"] / total_tokens, "ratio": sums["ratio"] / total_tokens, "clip_frac": sums["clipped"] / total_tokens, "kl": sums["kl"] / total_tokens, "entropy": sums["entropy"] / total_tokens, "tokens": float(total_tokens), "action_count": float(len(entries))}
