@@ -4,21 +4,17 @@ from __future__ import annotations
 import copy
 import math
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 from .contracts import ROLE_MAX_TOKENS, candidate_index, parse, prompt
 from .model import Action, generate
+from .reader import ANSWER_RE, THOUGHT_RE  # noqa: F401  (re-exported for chat.py)
+from .reader import legacy_reader_prompt as reader_prompt  # noqa: F401  (re-exported for chat.py)
 
-ANSWER_RE = re.compile(r"<answer>\s*(.*?)\s*</answer>", re.I | re.S)
-THOUGHT_RE = re.compile(r"<think>\s*(.*?)\s*</think>", re.I | re.S)
-
-
-def reader_prompt(question: str, context: list[dict[str, Any]], thoughts: list[str], final_only: bool) -> str:
-    ctx = "\n\n".join(f"[{x['doc_id']}] {x.get('title') or ''}\n{x['text']}" for x in context) or "(empty)"
-    instruction = "Return the final short answer now as <answer>...</answer>." if final_only else "Return one next thought as <think>...</think>, or the final answer as <answer>...</answer>."
-    thought_text = "\n".join(thoughts) or "(none)"
-    return f"You are the frozen reader in an adaptive RAG system.\nUse the supplied context when external evidence is required. {instruction}\n\nQuestion: {question}\nContext:\n{ctx}\nReasoning so far:\n{thought_text}\n"
+# (role, prompt, samples) -> sampled proxy actions
+GenerateFn = Callable[[str, str, int], list[Action]]
 
 
 def _f1(prediction: str, gold: list[str]) -> float:
@@ -62,10 +58,11 @@ class TreeNode:
     answer: str | None = None
     terminal: str | None = None
     children: list[str] = field(default_factory=list)
+    transcript: str = ""
 
 
 class BinaryTreeEnvironment:
-    def __init__(self, actor, tokenizer, reader, retriever, *, branch_factor: int, max_steps: int, max_leaves: int, temperature: float, top_p: float, alpha: float, retrieval_cost: float, behavior_checkpoint: str, initial_retrieval: bool = True, rd_gain_weight: float = 0.3, qf_gain_weight: float = 0.7, ki_hit_weight: float = 0.3, ki_miss_penalty: float = 0.1):
+    def __init__(self, actor, tokenizer, reader, retriever, *, branch_factor: int, max_steps: int, max_leaves: int, temperature: float, top_p: float, alpha: float, retrieval_cost: float, behavior_checkpoint: str, initial_retrieval: bool = True, rd_gain_weight: float = 0.3, qf_gain_weight: float = 0.7, ki_hit_weight: float = 0.3, ki_miss_penalty: float = 0.1, shaping_scale: float = 1.0, advantage_std_norm: bool = False, generate_fn: GenerateFn | None = None):
         if branch_factor != 2:
             raise ValueError("This implementation intentionally fixes binary-tree branch_factor to 2")
         self.actor, self.tokenizer, self.reader, self.retriever = actor, tokenizer, reader, retriever
@@ -74,6 +71,7 @@ class BinaryTreeEnvironment:
         self.behavior_checkpoint, self.initial_retrieval = behavior_checkpoint, initial_retrieval
         self.rd_gain_weight, self.qf_gain_weight = rd_gain_weight, qf_gain_weight
         self.ki_hit_weight, self.ki_miss_penalty = ki_hit_weight, ki_miss_penalty
+        self.shaping_scale, self.advantage_std_norm, self.generate_fn = shaping_scale, advantage_std_norm, generate_fn
 
     @staticmethod
     def _recall(gold_ids: set[str], passages: list[dict[str, Any]]) -> float | None:
@@ -86,47 +84,53 @@ class BinaryTreeEnvironment:
         action["reward_shaping"] = {key: float(value) for key, value in values.items()}
         action["reward_shaping"]["total"] = float(sum(values.values()))
 
-    def _sample(self, role: str, state: dict[str, Any]) -> list[dict[str, Any]]:
+    def _sample(self, role: str, state: dict[str, Any], samples: int) -> list[dict[str, Any]]:
         text_prompt = prompt(role, state)
-        actions: list[Action] = generate(self.actor, self.tokenizer, text_prompt, samples=self.branch_factor, max_new_tokens=ROLE_MAX_TOKENS[role], temperature=self.temperature, top_p=self.top_p)
+        if self.generate_fn is not None:
+            actions: list[Action] = self.generate_fn(role, text_prompt, samples)
+        else:
+            actions = generate(self.actor, self.tokenizer, text_prompt, samples=samples, max_new_tokens=ROLE_MAX_TOKENS[role], temperature=self.temperature, top_p=self.top_p)
         result = []
         for action in actions:
             parsed, valid, error = parse(role, action.text)
             result.append({"role": role, "prompt": text_prompt, "response": action.text, "parsed_action": parsed, "valid_format": valid, "validation_error": error, "response_token_ids": action.token_ids, "old_token_logprobs": action.token_logprobs, "old_logprob_sum": float(sum(action.token_logprobs)), "behavior_policy_checkpoint": self.behavior_checkpoint})
         return result
 
-    def _leaf(self, node: TreeNode, example: dict[str, Any], reason: str, final: bool = False) -> TreeNode:
-        response = self.reader.generate(reader_prompt(node.question, node.context, node.thoughts, final_only=final))
-        match = ANSWER_RE.search(response)
-        node.reader_response, node.answer, node.terminal = response, (match.group(1).strip() if match else response.strip()), reason
+    def _leaf(self, node: TreeNode, reason: str) -> TreeNode:
+        node.answer = self.reader.final(node.question, node.context, node.thoughts, node.transcript)
+        node.terminal = reason
         return node
 
     def _next_nodes(self, node: TreeNode, node_number: list[int], gold_ids: set[str], question_baseline: list[dict[str, Any]]) -> list[TreeNode]:
         """One reader thought plus RD -> optional QF -> KI, branching only at RD.
 
-        Keeping QF/KI deterministic per selected RD branch caps the binary tree while all
+        Keeping QF/KI to one sample per selected RD branch caps the binary tree while all
         proxy actions remain on-policy and receive the descendant leaf advantage.
         """
-        response = self.reader.generate(reader_prompt(node.question, node.context, node.thoughts, final_only=False))
-        answer = ANSWER_RE.search(response)
-        if answer:
-            node.reader_response, node.answer, node.terminal = response, answer.group(1).strip(), "reader_answer"
+        step = self.reader.step(node.question, node.context, node.thoughts, node.transcript)
+        if step.answer is not None:
+            node.reader_response, node.answer, node.terminal = step.piece, step.answer, "reader_answer"
+            node.transcript += step.piece
             return []
-        thought = (THOUGHT_RE.search(response).group(1).strip() if THOUGHT_RE.search(response) else response.strip())
+        if step.thought is None:
+            self._leaf(node, "reader_empty")
+            return []
+        thought = step.thought
         state = {"question": node.question, "context": node.context, "thoughts": node.thoughts + [thought], "current_thought": thought}
         children = []
-        for rd in self._sample("rd", state):
+        for rd in self._sample("rd", state, self.branch_factor):
             child = copy.deepcopy(node)
             child.node_id, child.parent_id, child.depth = f"n{node_number[0]}", node.node_id, node.depth + 1
             node_number[0] += 1
             child.thoughts.append(thought)
-            child.reader_response = response
+            child.transcript = node.transcript + step.piece
+            child.reader_response = step.piece
             child.actions = [rd]
             retrieve = rd["parsed_action"] if rd["valid_format"] else True
             if not rd["valid_format"]:
                 rd["environment_fallback"] = "invalid RD defaults to retrieval"
             if retrieve:
-                qf = self._sample("qf", state)[0]
+                qf = self._sample("qf", state, 1)[0]
                 child.actions.append(qf)
                 parsed_qf = qf["parsed_action"] if qf["valid_format"] else None
                 query = str(parsed_qf.get("query") or node.question) if parsed_qf else node.question
@@ -142,7 +146,7 @@ class BinaryTreeEnvironment:
                 candidates = self.retriever.candidate_triples(query, passages)
                 if candidates:
                     ki_state = {"question": node.question, "chain": parsed_qf.get("chain", []) if parsed_qf else [], "query": query, "candidates": candidates}
-                    ki = self._sample("ki", ki_state)[0]
+                    ki = self._sample("ki", ki_state, 1)[0]
                     child.actions.append(ki)
                     chosen = candidate_index(ki["parsed_action"] if ki["valid_format"] else None, candidates)
                     if chosen is None:
@@ -170,7 +174,6 @@ class BinaryTreeEnvironment:
         return children
 
     def run(self, example: dict[str, Any]) -> dict[str, Any]:
-        # Sampling must be deterministic except for the explicit policy distribution.
         self.actor.eval()
         select = getattr(self.retriever, "select", None)
         if select is not None:
@@ -184,7 +187,7 @@ class BinaryTreeEnvironment:
         while frontier and len(leaves) < self.max_leaves:
             node = frontier.pop(0)
             if node.depth >= self.max_steps:
-                leaves.append(self._leaf(node, example, "max_steps", final=True)); continue
+                leaves.append(self._leaf(node, "max_steps")); continue
             children = self._next_nodes(node, counter, gold_ids, question_baseline)
             if node.terminal:
                 leaves.append(node); continue
@@ -193,7 +196,7 @@ class BinaryTreeEnvironment:
                 if len(frontier) + len(leaves) < self.max_leaves:
                     frontier.append(child)
         for node in frontier:
-            leaves.append(self._leaf(node, example, "leaf_cap", final=True))
+            leaves.append(self._leaf(node, "leaf_cap"))
         records = []
         for leaf in leaves[: self.max_leaves]:
             chain, current = [], leaf
@@ -203,11 +206,17 @@ class BinaryTreeEnvironment:
             chain.reverse()
             retrievals = sum(action["role"] == "rd" and bool(action.get("parsed_action")) for nid in chain for action in nodes[nid].actions)
             actions = [action for nid in chain for action in nodes[nid].actions]
-            shaping = sum(float(action.get("reward_shaping", {}).get("total", 0.0)) for action in actions)
+            shaping = self.shaping_scale * sum(float(action.get("reward_shaping", {}).get("total", 0.0)) for action in actions)
             records.append({"leaf_id": leaf.node_id, "path": chain, "question_id": example["id"], "question": example["question"], "gold_answers": example["gold_answers"], "final_answer": leaf.answer, "terminal": leaf.terminal, "reward": reward(leaf.answer or "", example, leaf.context, retrievals, self.alpha, self.retrieval_cost, shaping), "actions": actions})
         values = [float(x["reward"]["total"]) for x in records]
         mean = sum(values) / len(values) if values else 0.0
         std = (sum((x - mean) ** 2 for x in values) / len(values)) ** 0.5 if values else 0.0
         for record in records:
-            record["advantage"] = 0.0 if std < 1e-6 else (float(record["reward"]["total"]) - mean) / (std + 1e-6)
-        return {"question_id": example["id"], "question": example["question"], "tree": {node_id: {"parent_id": node.parent_id, "depth": node.depth, "children": node.children, "terminal": node.terminal} for node_id, node in nodes.items()}, "leaves": records, "reward_mean": mean, "reward_std": std, "behavior_policy_checkpoint": self.behavior_checkpoint}
+            centered = float(record["reward"]["total"]) - mean
+            if std < 1e-6:
+                record["advantage"] = 0.0
+            elif self.advantage_std_norm:
+                record["advantage"] = centered / (std + 1e-6)
+            else:
+                record["advantage"] = centered  # Dr. GRPO: no std division
+        return {"question_id": example["id"], "question": example["question"], "tree": {node_id: {"parent_id": node.parent_id, "depth": node.depth, "children": node.children, "terminal": node.terminal} for node_id, node in nodes.items()}, "leaves": records, "reward_mean": mean, "reward_std": std, "zero_signal": std < 1e-6, "behavior_policy_checkpoint": self.behavior_checkpoint}
