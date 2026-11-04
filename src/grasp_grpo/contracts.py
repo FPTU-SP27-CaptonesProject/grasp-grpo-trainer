@@ -37,6 +37,30 @@ The selected triple should logically extend the current reasoning chain and help
 
 Output only the selected triple, copied exactly from the candidate list in the form <head; relation; tail>, and nothing else.'''
 
+# Project A (grasp) reader template, byte for byte: grasp/src/grasp/agents/prompts/reader.txt
+READER = '''Please answer the following question. Think step by step to solve it.
+
+First write out your reasoning one thought at a time. Put each thought inside <think> and </think> tags. After reasoning, put your final answer inside <answer> and </answer>. The final answer must be a short phrase or keyword only, without explanation.
+
+Your output should look like:
+<think> [your first thought] </think>
+<think> [your second thought] </think>
+...
+<think> [your final thought] </think>
+<answer> [short final answer] </answer>
+
+---
+Context:
+{context}
+
+Question: {question}
+'''
+
+
+def reader_context(items: list[dict[str, Any]] | None) -> str:
+    """Project A reader context: one `Title:`/`Text:` block per passage."""
+    return "\n\n".join(f"Title: {x.get('title') or ''}\nText: {x.get('text', '')}" for x in (items or []))
+
 
 def format_triple(value: Any) -> str:
     if isinstance(value, str):
