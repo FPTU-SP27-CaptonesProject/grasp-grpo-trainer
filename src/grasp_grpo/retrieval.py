@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -25,8 +26,8 @@ class DenseRetriever:
         self.encoder = SentenceTransformer(encoder)
         self.top_k, self.max_candidate_triples = top_k, max_candidate_triples
         self.query_prefix, self.passage_prefix = query_prefix, passage_prefix
-        self.db = sqlite3.connect(f"file:{self.passage_path.as_posix()}?mode=ro", uri=True)
-        self.triple_db = sqlite3.connect(f"file:{Path(triple_cache).resolve().as_posix()}?mode=ro", uri=True) if triple_cache else None
+        self.db = sqlite3.connect(f"file:{self.passage_path.as_posix()}?mode=ro", uri=True, check_same_thread=False)
+        self.triple_db = sqlite3.connect(f"file:{Path(triple_cache).resolve().as_posix()}?mode=ro", uri=True, check_same_thread=False) if triple_cache else None
 
     def search(self, query: str) -> list[dict[str, Any]]:
         import numpy as np
@@ -104,3 +105,45 @@ class CorpusRouter:
 
     def close(self) -> None:
         for retriever in self.retrievers.values(): retriever.close()
+
+
+class BoundRetriever:
+    """Pins a shared retriever to one example's corpus and serialises calls across rollout threads."""
+
+    def __init__(self, retriever, example: dict[str, Any], lock: threading.Lock):
+        self.retriever, self.example, self.lock = retriever, example, lock
+
+    def select(self, example: dict[str, Any]) -> None:
+        return None  # bound at construction
+
+    def _bind(self) -> None:
+        select = getattr(self.retriever, "select", None)
+        if select is not None:
+            select(self.example)
+
+    def search(self, query: str) -> list[dict[str, Any]]:
+        with self.lock:
+            self._bind()
+            return self.retriever.search(query)
+
+    def candidate_triples(self, query: str, passages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        with self.lock:
+            self._bind()
+            return self.retriever.candidate_triples(query, passages)
+
+
+def add_retrieval_arguments(parser) -> None:
+    parser.add_argument("--index-dir")
+    parser.add_argument("--corpus-config", help="JSON mapping metadata.dataset to index/triple artifacts")
+    parser.add_argument("--triple-cache")
+    parser.add_argument("--encoder", default="intfloat/e5-large-v2")
+    parser.add_argument("--top-k", type=int, default=10)
+    parser.add_argument("--max-candidate-triples", type=int, default=20)
+
+
+def retriever_from_args(args) -> DenseRetriever | CorpusRouter:
+    if bool(args.index_dir) == bool(args.corpus_config):
+        raise ValueError("provide exactly one of --index-dir or --corpus-config")
+    if args.corpus_config:
+        return CorpusRouter(args.corpus_config, args.encoder, top_k=args.top_k, max_candidate_triples=args.max_candidate_triples)
+    return DenseRetriever(args.index_dir, args.encoder, top_k=args.top_k, max_candidate_triples=args.max_candidate_triples, triple_cache=args.triple_cache)
