@@ -12,19 +12,20 @@ class Action:
     token_logprobs: list[float]
 
 
-def _token_logprobs(model, prefix: list[int], response_ids: list[int]):
-    """Token log probabilities under raw model logits, before sampling warpers."""
+def _token_logprobs_entropy(model, prefix: list[int], response_ids: list[int]):
+    """Float32 log P(token) and entropy of each response position, under raw logits (no sampling warpers)."""
     import torch
     import torch.nn.functional as F
 
     device = next(model.parameters()).device
     ids = torch.tensor([prefix + response_ids], device=device)
-    logits = model(input_ids=ids).logits[:, :-1]
-    targets = ids[:, 1:]
+    logits = model(input_ids=ids).logits[0, :-1]
     start = len(prefix) - 1
-    return F.log_softmax(logits[:, start : start + len(response_ids)], dim=-1).gather(
-        -1, targets[:, start : start + len(response_ids)].unsqueeze(-1)
-    ).squeeze(-1).squeeze(0)
+    window = F.log_softmax(logits[start : start + len(response_ids)].float(), dim=-1)
+    targets = ids[0, start + 1 : start + 1 + len(response_ids)]
+    selected = window.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
+    entropy = -(window.exp() * window).sum(-1)
+    return selected, entropy
 
 
 def load_policy(checkpoint: str, *, trainable: bool, load_in_4bit: bool = False):
@@ -67,37 +68,48 @@ def _prompt_ids(tokenizer, prompt: str, max_input_tokens: int = 3072, prompt_hea
     return ids[:head] + ids[-(max_input_tokens - head):]
 
 
-def generate(model, tokenizer, prompt: str, *, samples: int, max_new_tokens: int, temperature: float, top_p: float) -> list[Action]:
+def generate_batch(model, tokenizer, prompts: list[str], *, samples: int, max_new_tokens: int, temperature: float, top_p: float) -> list[list[Action]]:
+    """Sample `samples` actions for every prompt in one left-padded `generate` call."""
     import torch
 
     if samples > 1 and temperature <= 0:
         raise ValueError("multiple tree branches require temperature > 0")
-    prefix = _prompt_ids(tokenizer, prompt)
+    prefixes = [_prompt_ids(tokenizer, prompt) for prompt in prompts]
+    width = max(len(prefix) for prefix in prefixes)
     device = next(model.parameters()).device
-    inputs = {"input_ids": torch.tensor([prefix], device=device), "attention_mask": torch.ones((1, len(prefix)), device=device, dtype=torch.long)}
-    generation = {"do_sample": temperature > 0, "max_new_tokens": max_new_tokens, "num_return_sequences": samples, "pad_token_id": tokenizer.pad_token_id, "eos_token_id": tokenizer.eos_token_id, "return_dict_in_generate": True, "output_scores": True}
+    pad = tokenizer.pad_token_id
+    input_ids = torch.tensor([[pad] * (width - len(p)) + p for p in prefixes], device=device)
+    attention = torch.tensor([[0] * (width - len(p)) + [1] * len(p) for p in prefixes], device=device, dtype=torch.long)
+    generation = {"do_sample": temperature > 0, "max_new_tokens": max_new_tokens, "num_return_sequences": samples, "pad_token_id": pad, "eos_token_id": tokenizer.eos_token_id}
     if temperature > 0:
         generation.update(temperature=temperature, top_p=top_p)
     with torch.no_grad():
-        output = model.generate(**inputs, **generation)
-    width = inputs["input_ids"].shape[1]
-    output_actions = []
-    for i, ids in enumerate(output.sequences[:, width:]):
+        sequences = model.generate(input_ids=input_ids, attention_mask=attention, **generation)[:, width:]
+    results: list[list[Action]] = [[] for _ in prompts]
+    eos = tokenizer.eos_token_id
+    for row, ids in enumerate(sequences):
+        index = row // samples  # generate() repeats each prompt `samples` times in a row
         token_ids = ids.detach().cpu().tolist()
-        eos = tokenizer.eos_token_id
         if eos in token_ids:
-            end = token_ids.index(eos) + 1
-            token_ids = token_ids[:end]
-        # `generate().scores` include temperature/top-p warpers. GRPO needs
-        # raw behavior-policy probabilities for a valid importance ratio.
+            token_ids = token_ids[: token_ids.index(eos) + 1]
+        # Raw behavior-policy probabilities, recomputed without padding or sampling warpers,
+        # with the same float32 path the loss uses so the importance ratio starts at 1.
         with torch.no_grad():
-            raw_logprobs = _token_logprobs(model, prefix, token_ids)
-        output_actions.append(Action(tokenizer.decode(token_ids, skip_special_tokens=True).strip(), token_ids, raw_logprobs.detach().float().cpu().tolist()))
-    return output_actions
+            raw, _ = _token_logprobs_entropy(model, prefixes[index], token_ids)
+        results[index].append(Action(tokenizer.decode(token_ids, skip_special_tokens=True).strip(), token_ids, raw.cpu().tolist()))
+    return results
+
+
+def generate(model, tokenizer, prompt: str, *, samples: int, max_new_tokens: int, temperature: float, top_p: float) -> list[Action]:
+    return generate_batch(model, tokenizer, [prompt], samples=samples, max_new_tokens=max_new_tokens, temperature=temperature, top_p=top_p)[0]
+
+
+def response_logprob_entropy(model, tokenizer, prompt: str, response_ids: list[int]):
+    """Differentiable per-token log P(response) and entropy under the exact Project A chat prompt."""
+    return _token_logprobs_entropy(model, _prompt_ids(tokenizer, prompt), response_ids)
 
 
 def response_logprob(model, tokenizer, prompt: str, response_ids: list[int]):
     """Differentiable sum log P(response tokens | exact Project A chat prompt)."""
-    prefix = _prompt_ids(tokenizer, prompt)
-    selected = _token_logprobs(model, prefix, response_ids)
+    selected, _ = response_logprob_entropy(model, tokenizer, prompt, response_ids)
     return selected.sum(), selected
