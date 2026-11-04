@@ -1,0 +1,120 @@
+"""Greedy single-path evaluation of a proxy policy, plus a learning-signal probe (spec §4, §5 stage 0)."""
+from __future__ import annotations
+
+import argparse
+import json
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from typing import Any
+
+from .batcher import GenerationBatcher, role_generate_fn
+from .contracts import ROLES
+from .data import write_json
+from .environment import BinaryTreeEnvironment
+from .eval_ids import load_eval_examples
+from .evaluate import exact, f1
+from .infer import run_example
+from .model import generate_batch, load_policy
+from .reader import add_reader_arguments, reader_from_args
+from .retrieval import BoundRetriever, add_retrieval_arguments, retriever_from_args
+
+
+def _mean(values: list[float]) -> float | None:
+    return sum(values) / len(values) if values else None
+
+
+def summarize(examples: list[dict[str, Any]], predictions: list[dict[str, Any]], elapsed_seconds: float) -> dict[str, Any]:
+    by_id = {prediction["id"]: prediction for prediction in predictions}
+    rows, recalls, retrievals = [], [], []
+    formats: dict[str, list[bool]] = {role: [] for role in ROLES}
+    for example in examples:
+        prediction = by_id[example["id"]]
+        rows.append({"id": example["id"], "f1": f1(prediction["prediction"], example["gold_answers"]), "em": exact(prediction["prediction"], example["gold_answers"])})
+        gold = set(example.get("gold_doc_ids", []))
+        if gold:
+            recalls.append(len(gold & set(prediction["context_doc_ids"])) / len(gold))
+        for action in prediction["actions"]:
+            formats[action["role"]].append(bool(action["valid_format"]))
+        retrievals.append(sum(action["role"] == "qf" for action in prediction["actions"]))
+    return {
+        "questions": len(rows),
+        "f1": _mean([row["f1"] for row in rows]),
+        "em": _mean([row["em"] for row in rows]),
+        "context_recall": _mean(recalls),
+        "format_rate": {role: _mean([float(x) for x in values]) for role, values in formats.items()},
+        "mean_retrievals": _mean([float(x) for x in retrievals]),
+        "seconds_per_question": elapsed_seconds / len(rows),
+        "per_question": rows,
+    }
+
+
+def evaluate_policy(generate_fn, reader, retriever, examples: list[dict[str, Any]], *, max_steps: int, workers: int) -> dict[str, Any]:
+    lock = threading.Lock()
+    started = time.monotonic()
+
+    def one(example: dict[str, Any]) -> dict[str, Any]:
+        return run_example(generate_fn, reader, BoundRetriever(retriever, example, lock), example, max_steps)
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        predictions = list(pool.map(one, examples))
+    return summarize(examples, predictions, time.monotonic() - started)
+
+
+def signal_probe(make_env, examples: list[dict[str, Any]], *, workers: int) -> dict[str, Any]:
+    """Share of sampled trees whose leaves all score the same (zero advantage, no gradient)."""
+    started = time.monotonic()
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        trees = list(pool.map(lambda example: make_env(example).run(example), examples))
+    elapsed = time.monotonic() - started
+    action_trees = [tree for tree in trees if any(leaf["actions"] for leaf in tree["leaves"])]
+    zero = sum(bool(tree["zero_signal"]) for tree in action_trees)
+    return {"trees": len(trees), "action_trees": len(action_trees), "zero_signal_fraction": zero / len(action_trees) if action_trees else 1.0, "seconds_per_tree": elapsed / len(trees) if trees else None}
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description="Greedy eval of a proxy adapter on the fixed eval set")
+    parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--qa", required=True)
+    parser.add_argument("--eval-ids")
+    add_retrieval_arguments(parser)
+    add_reader_arguments(parser)
+    parser.add_argument("--max-steps", type=int, default=5)
+    parser.add_argument("--workers", type=int, default=16)
+    parser.add_argument("--max-batch", type=int, default=32)
+    parser.add_argument("--limit", type=int)
+    parser.add_argument("--signal-probe", type=int, default=0, help="Also sample N training-style trees and report the zero-signal share")
+    parser.add_argument("--temperature", type=float, default=0.7)
+    parser.add_argument("--top-p", type=float, default=0.95)
+    parser.add_argument("--max-leaves", type=int, default=4)
+    parser.add_argument("--alpha", type=float, default=0.3)
+    parser.add_argument("--shaping-scale", type=float, default=0.1)
+    parser.add_argument("--load-in-4bit", action="store_true")
+    parser.add_argument("--output", required=True)
+    args = parser.parse_args(argv)
+    examples = load_eval_examples(args.qa, args.eval_ids)
+    if args.limit is not None:
+        examples = examples[: args.limit]
+    retriever = retriever_from_args(args)
+    actor, tokenizer, _ = load_policy(args.checkpoint, trainable=False, load_in_4bit=args.load_in_4bit)
+    reader = reader_from_args(args)
+    batcher = GenerationBatcher(lambda prompts, **kwargs: generate_batch(actor, tokenizer, prompts, **kwargs), max_batch=args.max_batch)
+    report = evaluate_policy(role_generate_fn(batcher.generate, temperature=0.0, top_p=1.0), reader, retriever, examples, max_steps=args.max_steps, workers=args.workers)
+    if args.signal_probe:
+        lock = threading.Lock()
+        sample_fn = role_generate_fn(batcher.generate, temperature=args.temperature, top_p=args.top_p)
+
+        def make_env(example):
+            return BinaryTreeEnvironment(actor, tokenizer, reader, BoundRetriever(retriever, example, lock), branch_factor=2, max_steps=args.max_steps, max_leaves=args.max_leaves, temperature=args.temperature, top_p=args.top_p, alpha=args.alpha, retrieval_cost=0.0, behavior_checkpoint=str(Path(args.checkpoint).resolve()), shaping_scale=args.shaping_scale, generate_fn=sample_fn)
+
+        report["signal_probe"] = signal_probe(make_env, examples[: args.signal_probe], workers=args.workers)
+    report.update(checkpoint=str(Path(args.checkpoint).resolve()), reader_protocol=args.reader_protocol, max_steps=args.max_steps)
+    batcher.close()
+    retriever.close()
+    write_json(args.output, report)
+    print(json.dumps({key: value for key, value in report.items() if key != "per_question"}))
+
+
+if __name__ == "__main__":
+    main()
