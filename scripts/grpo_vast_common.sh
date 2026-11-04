@@ -34,3 +34,37 @@ activate_venv() {
   # shellcheck disable=SC1090
   source "$VENV_DIR/bin/activate"
 }
+
+# Tee all output to DIR/logs/console.log and sample nvidia-smi every 30 s until the script exits.
+start_logging() {
+  local dir="$1"
+  mkdir -p "$dir/logs"
+  exec > >(tee -a "$dir/logs/console.log") 2>&1
+  local gpu_log="$dir/logs/gpu_metrics.csv"
+  [[ -f "$gpu_log" ]] || echo "timestamp,index,name,gpu_util_percent,memory_used_mib,memory_total_mib,temperature_c,power_w" > "$gpu_log"
+  (
+    while true; do
+      nvidia-smi --query-gpu=timestamp,index,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw --format=csv,noheader,nounits >> "$gpu_log" || true
+      sleep 30
+    done
+  ) &
+  GPU_MONITOR_PID=$!
+  trap 'kill "$GPU_MONITOR_PID" 2>/dev/null || true' EXIT
+}
+
+reader_args() {
+  READER_ARGS=(--reader-url "$READER_URL" --reader-api-key "$READER_API_KEY" --reader-model "$READER_MODEL")
+}
+
+# Flags shared by every grasp-train-grpo call, built from vast.env.
+train_args() {
+  reader_args
+  TRAIN_ARGS=(--sft-checkpoint "$SFT_CHECKPOINT" --corpus-config "$CORPUS_CONFIG" "${READER_ARGS[@]}"
+    --reader-protocol "${READER_PROTOCOL:-grasp}" --workers "$WORKERS"
+    --branch-factor "$BRANCH_FACTOR" --max-steps "$MAX_STEPS" --max-leaves "$MAX_LEAVES"
+    --alpha "$ALPHA" --shaping-scale "$SHAPING_SCALE" --retrieval-cost "${RETRIEVAL_COST:-0.0}"
+    --rd-gain-weight "$RD_GAIN_WEIGHT" --qf-gain-weight "$QF_GAIN_WEIGHT"
+    --ki-hit-weight "$KI_HIT_WEIGHT" --ki-miss-penalty "$KI_MISS_PENALTY"
+    --learning-rate "$LEARNING_RATE" --warmup-steps "$WARMUP_STEPS"
+    --clip-low "$CLIP_LOW" --clip-high "$CLIP_HIGH" --kl-beta "$KL_BETA")
+}

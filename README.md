@@ -190,3 +190,18 @@ grasp-evaluate --qa /workspace/data/grasp-gold-evidence/dev.jsonl \
 
 Repeat with each GRPO checkpoint and select by dev F1 and context recall before touching the test
 split.
+
+## Training protocol (stages 0–4)
+
+Every GPU hour is gated; see `docs/superpowers/specs/2026-11-04-grpo-training-protocol-design.md`.
+
+| Stage | Script | Passes when |
+|---|---|---|
+| 0 | `scripts/stage0_baseline.sh` | SFT F1 ≥ 0.30 with the Project A reader, ≤ 50% zero-signal trees, ≤ 20 s per tree |
+| 1 | `scripts/stage1_smoke.sh` | finite loss, ratio ≈ 1, 0 < KL < 0.05, non-zero gradients, LoRA weights moved |
+| 2 | `scripts/stage2_overfit.sh` | reward on 8 fixed questions rises ≥ 30% in 40 steps |
+| 3 | `scripts/stage3_pilot.sh` | eval F1 ≥ SFT + 0.02 and no early-stop rule fired |
+| 4 | `scripts/train_grpo_vast.sh` | early stopping decides; use `best/` |
+
+Each stage writes `$OUTPUT_ROOT/stage<N>/stage_report.json` (`passed`, `reasons`). Do not start a stage before the previous one passed.
+Fixed eval ids live in `config/eval_ids.json` (`grasp-make-eval-ids`). Training stops itself on: no eval gain ≥ 0.02 F1 for 3 evals, F1 ≥ 0.03 below SFT twice, format rate < 90%, token KL > 0.3, entropy < 30% of start, > 60% zero-signal trees, or `--max-hours`.
