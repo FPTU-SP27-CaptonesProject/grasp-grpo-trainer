@@ -53,6 +53,22 @@ def test_summarize_reports_quality_format_and_speed():
     assert report["seconds_per_question"] == 5.0
 
 
+def test_summarize_breaks_scores_down_by_dataset():
+    examples = [
+        {"id": "a", "gold_answers": ["x"], "gold_doc_ids": ["d1"], "metadata": {"dataset": "wiki18"}},
+        {"id": "b", "gold_answers": ["y"], "gold_doc_ids": ["d2"], "metadata": {"dataset": "2wiki_ircot"}},
+        {"id": "c", "gold_answers": ["z"], "gold_doc_ids": [], "metadata": {"dataset": "2wiki_ircot"}},
+    ]
+    predictions = [
+        {"id": "a", "prediction": "x", "context_doc_ids": ["d1"], "actions": []},
+        {"id": "b", "prediction": "y", "context_doc_ids": [], "actions": []},
+        {"id": "c", "prediction": "no", "context_doc_ids": [], "actions": []},
+    ]
+    by = summarize(examples, predictions, elapsed_seconds=3.0)["by_dataset"]
+    assert by["wiki18"] == {"questions": 1, "f1": 1.0, "em": 1.0, "context_recall": 1.0}
+    assert by["2wiki_ircot"] == {"questions": 2, "f1": 0.5, "em": 0.5, "context_recall": 0.0}
+
+
 def test_signal_probe_counts_zero_signal_trees():
     trees = iter([
         {"zero_signal": True, "leaves": [{"actions": [1]}]},

@@ -34,6 +34,7 @@ grasp-infer = "grasp_grpo.infer:main"
 grasp-make-eval-ids = "grasp_grpo.eval_ids:main"
 grasp-eval-policy = "grasp_grpo.policy_eval:main"
 grasp-stage-gate = "grasp_grpo.stage_gate:main"
+grasp-sync-logs = "grasp_grpo.log_sync:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

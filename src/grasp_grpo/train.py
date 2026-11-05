@@ -183,6 +183,8 @@ def main(argv: list[str] | None = None) -> None:
         stopper.set_baseline(run_eval(0)["f1"])
 
     metrics: list[dict[str, Any]] = []
+    live_log = output / "metrics.jsonl"  # one line per step, for the live dashboard (metrics.json is only rewritten at saves)
+    live_log.write_text("", encoding="utf-8")
     cursor, stop_reason, step = 0, None, 0
     max_attempts = math.ceil(args.questions_per_iteration * (1 + args.max_refill_factor))
     started = time.monotonic()
@@ -224,6 +226,8 @@ def main(argv: list[str] | None = None) -> None:
         elapsed_hours = (time.monotonic() - started) / 3600
         info.update(elapsed_hours=elapsed_hours, eta_hours=elapsed_hours / step * (args.iterations - step))
         metrics.append(info)
+        with live_log.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(info) + "\n")
         tqdm.write(json.dumps(info))
         progress.set_postfix(reward=f"{info['mean_reward'] or 0.0:.3f}", kl=f"{info.get('kl', 0.0):.4f}", zero=f"{zero_fraction:.2f}")
         progress.update(1)

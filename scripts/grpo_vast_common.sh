@@ -53,7 +53,23 @@ start_logging() {
     done
   ) &
   GPU_MONITOR_PID=$!
-  trap 'kill "$GPU_MONITOR_PID" 2>/dev/null || true' EXIT
+  LOG_SYNC_PID=""
+  LOG_RUN_DIR="$dir"
+  # Live dashboard: push small logs (no checkpoints) to a private HF dataset every LOG_SYNC_SECONDS.
+  if [[ "${LOG_SYNC:-1}" == "1" ]]; then
+    python -m grasp_grpo.log_sync --run-dir "$dir" --repo "${LOG_REPO:-doancuavahk/grasp-grpo-logs}" \
+      --every "${LOG_SYNC_SECONDS:-180}" >> "$dir/logs/log_sync.log" 2>&1 &
+    LOG_SYNC_PID=$!
+  fi
+  trap stop_logging EXIT
+}
+
+stop_logging() {
+  kill "$GPU_MONITOR_PID" ${LOG_SYNC_PID:+"$LOG_SYNC_PID"} 2>/dev/null || true
+  if [[ -n "$LOG_SYNC_PID" ]]; then  # last upload so the dashboard sees the final state
+    python -m grasp_grpo.log_sync --run-dir "$LOG_RUN_DIR" --repo "${LOG_REPO:-doancuavahk/grasp-grpo-logs}" --once \
+      >> "$LOG_RUN_DIR/logs/log_sync.log" 2>&1 || true
+  fi
 }
 
 # The SFT adapter was trained with QLoRA (nf4 base): load the policy the same way (and it fits a 24GB card).

@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GRPO Live</title>
+<script src="https://cdn.jsdelivr.net/npm/plotly.js-dist-min@2.35.2/plotly.min.js"></script>
+<style>
+:root {
+  color-scheme: light;
+  --surface-0: #f4f3ef; --surface-1: #fcfcfb;
+  --text-primary: #0b0b0b; --text-secondary: #52514e; --muted: #898781;
+  --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,0.10);
+  --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a;
+  --good: #008300; --critical: #c62828; --warning: #b26b00;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --surface-0: #111110; --surface-1: #1a1a19;
+    --text-primary: #f0efec; --text-secondary: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
+    --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70;
+    --good: #4caf50; --critical: #ef5350; --warning: #f0a030;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --surface-0: #111110; --surface-1: #1a1a19;
+  --text-primary: #f0efec; --text-secondary: #c3c2b7; --muted: #898781;
+  --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
+  --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70;
+  --good: #4caf50; --critical: #ef5350; --warning: #f0a030;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--surface-0); color: var(--text-primary);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; padding: 16px 20px 8px; }
+h1 { font-size: 18px; margin: 0 12px 0 0; }
+select, button { font: inherit; color: var(--text-primary); background: var(--surface-1);
+  border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; }
+.meta { color: var(--text-secondary); font-size: 13px; }
+.err { color: var(--critical); font-size: 13px; }
+main { padding: 8px 20px 32px; max-width: 1500px; margin: 0 auto; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 14px; }
+.tile { background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+.tile .label { color: var(--text-secondary); font-size: 12px; }
+.tile .value { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.tile .sub { color: var(--muted); font-size: 12px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(440px, 1fr)); gap: 12px; }
+.card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px 4px; min-width: 0; }
+.card h2 { font-size: 14px; margin: 0; }
+.card p { margin: 2px 0 0; color: var(--text-secondary); font-size: 12px; }
+.chart { height: 250px; }
+table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; font-size: 13px; }
+th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--grid); }
+th { color: var(--text-secondary); font-weight: 500; }
+pre { background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; padding: 10px;
+  max-height: 340px; overflow: auto; font-size: 12px; color: var(--text-secondary); white-space: pre-wrap; }
+section { margin-top: 16px; }
+section > h2 { font-size: 15px; margin: 0 0 8px; }
+.ok { color: var(--good); } .bad { color: var(--critical); }
+@media (max-width: 520px) { .grid { grid-template-columns: 1fr; } header, main { padding-left: 16px; padding-right: 16px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>GRPO live</h1>
+  <label class="meta">Run <select id="run"></select></label>
+  <button id="theme" title="Đổi sáng/tối">Sáng/tối</button>
+  <span class="meta" id="status">Đang tải…</span>
+  <span class="err" id="error"></span>
+</header>
+<main>
+  <div class="tiles" id="tiles"></div>
+  <div class="grid" id="charts"></div>
+  <section id="reports"></section>
+  <section><h2>Console (dòng cuối)</h2><pre id="console">—</pre></section>
+</main>
+<script>
+const PROJECT_A_SFT_F1 = 0.568;  // Project A eval of the SFT adapter, same 300 ids (2026-11-05)
+const DATASETS = ["2wiki_ircot", "hotpotqa_abstracts_2017", "wiki18"];
+const DS_LABEL = {"2wiki_ircot": "2Wiki", "hotpotqa_abstracts_2017": "HotpotQA", "wiki18": "NQ"};
+let DATA = null;
+
+const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const fmt = (v, d = 3) => v === null || v === undefined || Number.isNaN(v) ? "—" : Number(v).toFixed(d);
+const el = (tag, attrs = {}, text) => { const e = document.createElement(tag); Object.assign(e, attrs); if (text !== undefined) e.textContent = text; return e; };
+
+function rolling(ys, w = 10) {
+  const out = []; let sum = 0, n = 0; const q = [];
+  for (const y of ys) {
+    if (y === null || y === undefined) { out.push(n ? sum / n : null); continue; }
+    q.push(y); sum += y; n++;
+    if (q.length > w) { sum -= q.shift(); n--; }
+    out.push(sum / n);
+  }
+  return out;
+}
+
+function layout(yTitle, extra = {}) {
+  return Object.assign({
+    margin: {l: 48, r: 12, t: 8, b: 32}, paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)",
+    font: {family: "system-ui, -apple-system, Segoe UI, sans-serif", size: 12, color: css("--text-secondary")},
+    hovermode: "x unified", hoverlabel: {bgcolor: css("--surface-1"), bordercolor: css("--axis"), font: {color: css("--text-primary")}},
+    xaxis: {title: {text: "bước", standoff: 4}, gridcolor: css("--grid"), linecolor: css("--axis"), zeroline: false, showspikes: true, spikemode: "across", spikethickness: 1, spikecolor: css("--muted"), spikedash: "solid"},
+    yaxis: {title: {text: yTitle}, gridcolor: css("--grid"), linecolor: css("--axis"), zeroline: false},
+    legend: {orientation: "h", y: 1.12, x: 0, font: {color: css("--text-secondary")}},
+    showlegend: true,
+  }, extra);
+}
+
+function line(x, y, name, color, opts = {}) {
+  return Object.assign({x, y, name, type: "scatter", mode: "lines", line: {color, width: 2}, connectgaps: true,
+    hovertemplate: `%{y:.4f}<extra>${name}</extra>`}, opts);
+}
+
+function card(id, title, note) {
+  const c = el("div", {className: "card"});
+  c.append(el("h2", {}, title));
+  if (note) c.append(el("p", {}, note));
+  c.append(el("div", {className: "chart", id}));
+  return c;
+}
+
+function tile(label, value, sub, cls) {
+  const t = el("div", {className: "tile"});
+  t.append(el("div", {className: "label"}, label));
+  const v = el("div", {className: "value" + (cls ? " " + cls : "")}, value);
+  t.append(v);
+  if (sub) t.append(el("div", {className: "sub"}, sub));
+  return t;
+}
+
+function stage0F1() {
+  for (const r of DATA.runs) { const rep = r.reports && r.reports.stage0_grasp; if (rep && rep.f1 !== undefined) return rep.f1; }
+  return null;
+}
+
+function plot(id, traces, lay) {
+  Plotly.react(id, traces, lay, {displaylogo: false, responsive: true, modeBarButtonsToRemove: ["lasso2d", "select2d"]});
+}
+
+function renderRun(run) {
+  const tiles = document.getElementById("tiles"), charts = document.getElementById("charts");
+  tiles.replaceChildren(); charts.replaceChildren();
+  const m = run.metrics || [], ev = run.eval_history || [];
+  const manifest = run.reports.run_manifest, cfg = run.reports.grpo_config || {};
+  const s0 = stage0F1();
+  const last = m[m.length - 1] || {};
+  const total = (cfg.config && cfg.config.iterations) || cfg.iterations;
+  const best = ev.reduce((b, e) => (b === null || e.f1 > b.f1) ? e : b, null);
+  const lastEval = ev[ev.length - 1];
+  const sftRef = s0 ?? PROJECT_A_SFT_F1;
+
+  if (m.length) {
+    tiles.append(tile("Bước", `${last.step}${total ? " / " + total : ""}`, manifest ? `dừng: ${manifest.stop_reason || "chạy xong"}` : "đang chạy"));
+    tiles.append(tile("Đã chạy / còn lại", `${fmt(last.elapsed_hours, 1)} h`, `ETA ${fmt(last.eta_hours, 1)} h`));
+    tiles.append(tile("Reward (TB 10 bước)", fmt(rolling(m.map(x => x.mean_reward)).pop()), `bước cuối ${fmt(last.mean_reward)}`));
+    tiles.append(tile("KL", fmt(last.kl, 4), `entropy ${fmt(last.entropy, 3)}`));
+    tiles.append(tile("Nhóm không tín hiệu", fmt(last.zero_signal_fraction, 2), `${fmt(last.seconds_per_question, 1)} s/câu`));
+  }
+  if (lastEval) {
+    const delta = lastEval.f1 - sftRef;
+    tiles.append(tile("Eval F1 gần nhất", fmt(lastEval.f1), `${delta >= 0 ? "+" : ""}${fmt(delta)} so với SFT (${fmt(sftRef)}) · bước ${lastEval.step}`, delta >= 0.02 ? "ok" : (delta < 0 ? "bad" : "")));
+  }
+  if (best) tiles.append(tile("Eval F1 tốt nhất", fmt(best.f1), `bước ${best.step}`));
+
+  if (ev.length) {
+    charts.append(card("c-eval", "Eval F1 (300 câu cố định)", "Đường nét đứt: mốc SFT. Pilot đạt khi F1 ≥ SFT + 0.02."));
+    charts.append(card("c-evalds", "Eval F1 theo dataset"));
+  }
+  if (m.length) {
+    charts.append(card("c-reward", "Reward khi rollout", "Mảnh: từng bước · đậm: trung bình 10 bước"));
+    charts.append(card("c-f1rec", "F1 câu trả lời và recall khi rollout", "Trung bình 10 bước"));
+    charts.append(card("c-kl", "KL so với SFT", "Tăng đều là bình thường; vọt lên là dấu hiệu lệch"));
+    charts.append(card("c-entropy", "Entropy của policy"));
+    charts.append(card("c-zero", "Tỷ lệ nhóm không tín hiệu", "Mọi nhánh cùng reward → không học được"));
+    charts.append(card("c-format", "Tỷ lệ đúng định dạng theo vai", "Trung bình 10 bước"));
+    charts.append(card("c-grad", "Grad norm"));
+    charts.append(card("c-speed", "Giây mỗi câu (rollout)"));
+  }
+  if (run.gpu.length) charts.append(card("c-gpu", "VRAM đang dùng", "Mẫu mỗi 30 giây · GPU 0 reader, GPU 1 train"));
+
+  const c1 = css("--series-1"), c2 = css("--series-2"), c3 = css("--series-3"), mut = css("--muted");
+  if (ev.length) {
+    const x = ev.map(e => e.step);
+    const refs = [];
+    refs.push(line([Math.min(...x), Math.max(...x, 1)], [sftRef, sftRef], s0 !== null ? "SFT (chặng 0)" : "SFT (eval Project A)", mut, {line: {color: mut, width: 1.5, dash: "dash"}, hovertemplate: `%{y:.3f}<extra>SFT</extra>`}));
+    refs.push(line([Math.min(...x), Math.max(...x, 1)], [sftRef + 0.02, sftRef + 0.02], "mục tiêu pilot (SFT + 0.02)", css("--good"), {line: {color: css("--good"), width: 1.5, dash: "dot"}, hovertemplate: `%{y:.3f}<extra>mục tiêu</extra>`}));
+    plot("c-eval", [line(x, ev.map(e => e.f1), "F1", c1, {mode: "lines+markers", marker: {size: 8, color: c1, line: {color: css("--surface-1"), width: 2}}}), ...refs], layout("F1"));
+    const cols = [c1, c2, c3];
+    plot("c-evalds", DATASETS.map((d, i) => line(x, ev.map(e => e.by_dataset && e.by_dataset[d] ? e.by_dataset[d].f1 : null), DS_LABEL[d], cols[i], {mode: "lines+markers", marker: {size: 8, color: cols[i], line: {color: css("--surface-1"), width: 2}}})), layout("F1"));
+  }
+  if (m.length) {
+    const x = m.map(r => r.step), col = k => m.map(r => r[k] ?? null);
+    plot("c-reward", [line(x, col("mean_reward"), "từng bước", c1, {line: {color: c1, width: 1}, opacity: 0.35}), line(x, rolling(col("mean_reward")), "TB 10 bước", c1)], layout("reward"));
+    plot("c-f1rec", [line(x, rolling(col("mean_answer_f1")), "F1 câu trả lời", c1), line(x, rolling(col("mean_context_recall")), "context recall", c2)], layout("0–1"));
+    plot("c-kl", [line(x, col("kl"), "KL", c1)], layout("KL", {showlegend: false}));
+    plot("c-entropy", [line(x, col("entropy"), "entropy", c1)], layout("nats/token", {showlegend: false}));
+    plot("c-zero", [line(x, col("zero_signal_fraction"), "từng bước", c1, {line: {color: c1, width: 1}, opacity: 0.35}), line(x, rolling(col("zero_signal_fraction")), "TB 10 bước", c1)], layout("tỷ lệ"));
+    plot("c-format", [line(x, rolling(col("format_rate_rd")), "RD", c1), line(x, rolling(col("format_rate_qf")), "QF", c2), line(x, rolling(col("format_rate_ki")), "KI", c3)], layout("tỷ lệ"));
+    plot("c-grad", [line(x, col("grad_norm"), "grad norm", c1)], layout("L2 (trước clip 1.0)", {showlegend: false}));
+    plot("c-speed", [line(x, col("seconds_per_question"), "s/câu", c1)], layout("giây", {showlegend: false}));
+  }
+  if (run.gpu.length) {
+    const gpus = [...new Set(run.gpu.map(g => g.gpu))].sort();
+    const cols = [c1, c2, c3];
+    const traces = gpus.map((g, i) => { const rows = run.gpu.filter(r => r.gpu === g);
+      return line(rows.map(r => r.t), rows.map(r => r.mem_gb), `GPU ${g}`, cols[i % 3], {hovertemplate: `%{y:.1f} GB<extra>GPU ${g}</extra>`}); });
+    const totalGb = Math.max(...run.gpu.map(r => r.total_gb));
+    plot("c-gpu", traces, layout("GB", {xaxis: {title: {text: "giờ (máy Vast, UTC)"}, type: "date", tickformat: "%H:%M", gridcolor: css("--grid"), linecolor: css("--axis")}, yaxis: {title: {text: "GB"}, range: [0, totalGb * 1.05], gridcolor: css("--grid"), linecolor: css("--axis")}}));
+  }
+  renderReports(run);
+  document.getElementById("console").textContent = run.console || "—";
+}
+
+function renderReports(run) {
+  const box = document.getElementById("reports"); box.replaceChildren();
+  const evals = Object.entries(run.reports).filter(([, r]) => r && r.f1 !== undefined && r.questions);
+  const gate = run.reports.stage_report;
+  if (gate) {
+    box.append(el("h2", {}, "Cổng kiểm tra chặng"));
+    const passed = gate.passed;
+    box.append(el("p", {className: passed ? "ok" : "bad"}, passed ? "ĐẠT — được chạy chặng tiếp theo" : "CHƯA ĐẠT — xem lý do bên dưới"));
+    const ul = el("ul");
+    for (const reason of gate.reasons || []) ul.append(el("li", {}, String(reason)));
+    if ((gate.reasons || []).length) box.append(ul);
+  }
+  if (evals.length) {
+    const h = el("h2", {}, "Kết quả eval"); h.style.marginTop = "16px"; box.append(h);
+    const t = el("table"); const head = el("tr");
+    ["Báo cáo", "Dataset", "Câu", "EM", "F1", "Recall", "s/câu", "Doc thiếu triple"].forEach(x => head.append(el("th", {}, x))); t.append(head);
+    for (const [name, r] of evals) {
+      const cov = r.triple_coverage ? Object.values(r.triple_coverage).reduce((a, s) => [a[0] + (s.docs_without_triples || 0), a[1] + (s.docs || 0)], [0, 0]) : null;
+      const rows = [["tổng", r]].concat(Object.entries(r.by_dataset || {}).map(([d, s]) => [DS_LABEL[d] || d, s]));
+      rows.forEach(([d, s], i) => {
+        const tr = el("tr");
+        [i ? "" : name, d, s.questions, fmt(s.em), fmt(s.f1), fmt(s.context_recall), i ? "" : fmt(r.seconds_per_question, 1),
+         i ? "" : (cov && cov[1] ? `${(100 * cov[0] / cov[1]).toFixed(1)}%` : "—")].forEach(v => tr.append(el("td", {}, String(v ?? "—"))));
+        t.append(tr);
+      });
+    }
+    box.append(t);
+    const ref = el("p", {className: "meta"}, `Mốc so sánh: eval Project A cùng 300 câu — EM 0.457, F1 ${PROJECT_A_SFT_F1}, recall 0.739.`); box.append(ref);
+  }
+}
+
+function render() {
+  if (!DATA) return;
+  const sel = document.getElementById("run"), keep = sel.value;
+  const names = DATA.runs.map(r => r.name);
+  if ([...sel.options].map(o => o.value).join() !== names.join()) {
+    sel.replaceChildren(...names.map(n => el("option", {value: n}, n)));
+    const saved = (() => { try { return localStorage.getItem("grpo-run"); } catch { return null; } })();
+    sel.value = names.includes(keep) ? keep : (names.includes(saved) ? saved : names[names.length - 1] || "");
+  }
+  const run = DATA.runs.find(r => r.name === sel.value);
+  const when = DATA.fetched ? new Date(DATA.fetched * 1000).toLocaleTimeString() : "—";
+  document.getElementById("status").textContent = `${DATA.repo} · kéo lúc ${when} · tự làm mới mỗi phút`;
+  document.getElementById("error").textContent = DATA.error ? `Lỗi tải: ${DATA.error}` : "";
+  if (run) renderRun(run); else document.getElementById("tiles").replaceChildren(el("p", {className: "meta"}, "Chưa có run nào. Log xuất hiện vài phút sau khi một chặng bắt đầu trên Vast."));
+}
+
+async function load() {
+  try { DATA = await (await fetch("/api/data", {cache: "no-store"})).json(); render(); }
+  catch (e) { document.getElementById("error").textContent = `Không gọi được server local: ${e}`; }
+}
+
+document.getElementById("run").addEventListener("change", e => { try { localStorage.setItem("grpo-run", e.target.value); } catch {} render(); });
+document.getElementById("theme").addEventListener("click", () => {
+  const dark = matchMedia("(prefers-color-scheme: dark)").matches;
+  const cur = document.documentElement.dataset.theme || (dark ? "dark" : "light");
+  document.documentElement.dataset.theme = cur === "dark" ? "light" : "dark";
+  try { localStorage.setItem("grpo-theme", document.documentElement.dataset.theme); } catch {}
+  render();
+});
+try { const t = localStorage.getItem("grpo-theme"); if (t) document.documentElement.dataset.theme = t; } catch {}
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", render);
+load(); setInterval(load, 60000);
+</script>
+</body>
+</html>

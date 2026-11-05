@@ -48,6 +48,19 @@ from it give KI no candidates (there is no extractor here), and `grasp-eval-poli
 share under `triple_coverage`. `scripts/build_triple_caches_vast.sh` (triples from teacher
 trajectories only) is kept for the legacy layout.
 
+## Live dashboard
+
+Every stage script pushes its small logs (per-step `metrics.jsonl`, `eval_history.json`, stage
+reports, GPU memory samples, the last console lines; never checkpoints) to the private dataset
+`LOG_REPO` (default `doancuavahk/grasp-grpo-logs`) every `LOG_SYNC_SECONDS`, plus once on exit.
+On your own machine, after `hf auth login`:
+
+```powershell
+.venv\Scripts\python scripts\dashboard.py   # opens http://127.0.0.1:8765, refreshes every minute
+```
+
+Logs stay on the Hub when the Vast instance stops. Set `LOG_SYNC=0` in `config/vast.env` to disable.
+
 ## Gold-evidence GRPO data
 
 For recall-aware GRPO, enrich the QA rows with `gold_doc_ids`. These IDs are used only by the

@@ -46,8 +46,22 @@ def summarize(examples: list[dict[str, Any]], predictions: list[dict[str, Any]],
         "format_rate": {role: _mean([float(x) for x in values]) for role, values in formats.items()},
         "mean_retrievals": _mean([float(x) for x in retrievals]),
         "seconds_per_question": elapsed_seconds / len(rows),
+        "by_dataset": _by_dataset(examples, rows, by_id),
         "per_question": rows,
     }
+
+
+def _by_dataset(examples: list[dict[str, Any]], rows: list[dict[str, Any]], by_id: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    groups: dict[str, dict[str, list[float]]] = {}
+    for example, row in zip(examples, rows, strict=True):
+        dataset = str(example.get("metadata", {}).get("dataset") or example.get("dataset") or str(example["id"]).split("::", 1)[0])
+        group = groups.setdefault(dataset, {"f1": [], "em": [], "recall": []})
+        group["f1"].append(row["f1"])
+        group["em"].append(row["em"])
+        gold = set(example.get("gold_doc_ids", []))
+        if gold:
+            group["recall"].append(len(gold & set(by_id[example["id"]]["context_doc_ids"])) / len(gold))
+    return {name: {"questions": len(g["f1"]), "f1": _mean(g["f1"]), "em": _mean(g["em"]), "context_recall": _mean(g["recall"])} for name, g in sorted(groups.items())}
 
 
 def evaluate_policy(generate_fn, reader, retriever, examples: list[dict[str, Any]], *, max_steps: int, workers: int) -> dict[str, Any]:
