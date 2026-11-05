@@ -43,9 +43,13 @@ Download the adapter, corpora, triple cache and gold-evidence QA with
 `bash scripts/fetch_data_vast.sh`, then use `CORPUS_CONFIG=config/corpora.vast.json`. Retrieval
 reproduces Project A (`configs/retriever/e5_large.yaml` there): FAISS with `nprobe=64` returns 100
 candidates, which are re-scored by re-encoding `title. text`, keeping the top 10. Triples come from
-Project A's shared cache (`doancuavahk/grasp-retrieval`, `cache/triples.sqlite`); documents missing
-from it give KI no candidates (there is no extractor here), and `grasp-eval-policy` reports the
-share under `triple_coverage`. `scripts/build_triple_caches_vast.sh` (triples from teacher
+Project A's shared cache (`doancuavahk/grasp-retrieval`, `cache/triples.sqlite`). About 21% of
+retrieved documents are missing from it; with `EXTRACT_TRIPLES=1` (`--extract-triples`) they are
+extracted on first retrieval with Project A's extractor (same prompt, Qwen3-235B on Bedrock,
+`BEDROCK_API_KEY`) and written back to the cache, capped per process by `EXTRACT_BUDGET_USD`.
+`grasp-eval-policy` reports `triple_coverage` (`cache_misses` = before extraction) and
+`triple_extraction` (documents, tokens, USD). Upload the grown cache back to the Hub before the
+instance is destroyed so later runs start from it. `scripts/build_triple_caches_vast.sh` (triples from teacher
 trajectories only) is kept for the legacy layout.
 
 ## Live dashboard
@@ -159,8 +163,9 @@ intended fixed KL reference.
 
 - The Project A adapter must be downloaded locally first; this project intentionally does not
   accept an HF repository ID as a checkpoint path.
-- A 24 GB GPU is typically suited to QLoRA. Do not load actor and reference in 4-bit unless your
-  bitsandbytes/PEFT stack supports training the exact adapter configuration.
+- The actor and the frozen KL reference are two adapters on one base model (bf16 by default, about
+  6 GB; `LOAD_IN_4BIT=1` for nf4). The backward pass uses gradient checkpointing with dropout off,
+  and only response positions get logits, so a 24 GB card holds the trainer.
 - `grasp-grpo-chat` is deliberately a basic reader/retriever demo. Production evaluation must use
   the same datasets, corpus, reader, context budget and metric implementation for GRASP and every
   baseline.

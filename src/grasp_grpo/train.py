@@ -26,7 +26,12 @@ from .grpo import grpo_backward
 from .model import generate_batch, load_policy
 from .policy_eval import evaluate_policy
 from .reader import add_reader_arguments, reader_from_args
-from .retrieval import BoundRetriever, add_retrieval_arguments, retriever_from_args
+from .retrieval import (
+    BoundRetriever,
+    add_retrieval_arguments,
+    extraction_stats,
+    retriever_from_args,
+)
 from .stopping import EarlyStopper, StopConfig
 
 
@@ -82,7 +87,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     # misc
     p.add_argument("--save-every", type=int, default=50)
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--load-in-4bit", action="store_true")
+    p.add_argument("--load-in-4bit", action="store_true", help="nf4 base (slower generation, less memory); default bf16")
     p.add_argument("--no-initial-retrieval", action="store_true")
     return p.parse_args(argv)
 
@@ -127,7 +132,7 @@ def _now() -> str:
 
 def save_adapter(actor, tokenizer, path: Path, metadata: dict[str, Any]) -> Path:
     path.mkdir(parents=True, exist_ok=True)
-    actor.save_pretrained(path)
+    actor.save_pretrained(path, selected_adapters=["default"])  # not the frozen reference copy
     tokenizer.save_pretrained(path)
     write_json(path / "grpo_config.json", {**metadata, "created_at_utc": _now()})
     return path
@@ -148,8 +153,8 @@ def main(argv: list[str] | None = None) -> None:
     eval_examples = load_eval_examples(args.eval_qa, args.eval_ids) if args.eval_qa else None
     retriever = retriever_from_args(args)
     actor_source = args.actor_checkpoint or args.sft_checkpoint
-    actor, tokenizer, _ = load_policy(actor_source, trainable=True, load_in_4bit=args.load_in_4bit)
-    reference, _, _ = load_policy(args.sft_checkpoint, trainable=False, load_in_4bit=args.load_in_4bit)
+    # One base model: trainable adapter "default" + the frozen SFT adapter as the KL reference.
+    actor, tokenizer, _ = load_policy(actor_source, trainable=True, load_in_4bit=args.load_in_4bit, reference_checkpoint=args.sft_checkpoint)
     params = [p for p in actor.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(params, lr=args.learning_rate)
     reader = reader_from_args(args)
@@ -217,12 +222,15 @@ def main(argv: list[str] | None = None) -> None:
                 group["lr"] = lr
             optimizer.zero_grad(set_to_none=True)
             leaves = [leaf for tree in collected for leaf in tree["leaves"]]
-            info.update(grpo_backward(actor, reference, tokenizer, leaves, clip_low=args.clip_low, clip_high=args.clip_high, kl_beta=args.kl_beta))
+            info.update(grpo_backward(actor, None, tokenizer, leaves, clip_low=args.clip_low, clip_high=args.clip_high, kl_beta=args.kl_beta))
             info["grad_norm"] = float(torch.nn.utils.clip_grad_norm_(params, 1.0))
             optimizer.step()
             info.update(lr=lr, updated=True)
         else:
             info["updated"] = False
+        extraction = extraction_stats(retriever)
+        if extraction is not None:
+            info.update(extract_usd=extraction["usd"], extract_requested=extraction["requested"], extract_failed=extraction["failed"])
         elapsed_hours = (time.monotonic() - started) / 3600
         info.update(elapsed_hours=elapsed_hours, eta_hours=elapsed_hours / step * (args.iterations - step))
         metrics.append(info)

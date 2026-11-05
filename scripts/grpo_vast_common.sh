@@ -72,10 +72,23 @@ stop_logging() {
   fi
 }
 
-# The SFT adapter was trained with QLoRA (nf4 base): load the policy the same way (and it fits a 24GB card).
+# Default bf16 base: generation is 2-3x faster than the nf4 base (bitsandbytes dequantises every matmul).
+# LOAD_IN_4BIT=1 loads nf4 like the QLoRA SFT run (less memory, slower).
 quant_args() {
   QUANT_ARGS=()
-  [[ "${LOAD_IN_4BIT:-1}" == "1" ]] && QUANT_ARGS=(--load-in-4bit)
+  [[ "${LOAD_IN_4BIT:-0}" == "1" ]] && QUANT_ARGS=(--load-in-4bit)
+  return 0
+}
+
+# Lazy triple extraction (Project A extractor on Bedrock) for retrieved documents missing from the cache.
+extract_args() {
+  EXTRACT_ARGS=()
+  if [[ "${EXTRACT_TRIPLES:-0}" == "1" ]]; then
+    require_value BEDROCK_API_KEY
+    export BEDROCK_API_KEY
+    [[ -n "${BEDROCK_BASE_URL:-}" ]] && export BEDROCK_BASE_URL
+    EXTRACT_ARGS=(--extract-triples --extract-budget-usd "${EXTRACT_BUDGET_USD:-10}")
+  fi
   return 0
 }
 
@@ -87,7 +100,8 @@ reader_args() {
 train_args() {
   reader_args
   quant_args
-  TRAIN_ARGS=(--sft-checkpoint "$SFT_CHECKPOINT" --corpus-config "$CORPUS_CONFIG" "${READER_ARGS[@]}" "${QUANT_ARGS[@]}"
+  extract_args
+  TRAIN_ARGS=(--sft-checkpoint "$SFT_CHECKPOINT" --corpus-config "$CORPUS_CONFIG" "${READER_ARGS[@]}" "${QUANT_ARGS[@]}" "${EXTRACT_ARGS[@]}"
     --reader-protocol "${READER_PROTOCOL:-grasp}" --workers "$WORKERS"
     --branch-factor "$BRANCH_FACTOR" --max-steps "$MAX_STEPS" --max-leaves "$MAX_LEAVES"
     --alpha "$ALPHA" --shaping-scale "$SHAPING_SCALE" --retrieval-cost "${RETRIEVAL_COST:-0.0}"

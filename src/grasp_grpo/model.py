@@ -1,8 +1,12 @@
 """Trainable PEFT actor, frozen reference, and token-level policy utilities."""
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+
+# Name of the frozen SFT adapter loaded next to the trainable one (one shared base model for both).
+REFERENCE_ADAPTER = "reference"
 
 
 @dataclass
@@ -13,22 +17,85 @@ class Action:
 
 
 def _token_logprobs_entropy(model, prefix: list[int], response_ids: list[int]):
-    """Float32 log P(token) and entropy of each response position, under raw logits (no sampling warpers)."""
+    """Float32 log P(token) and entropy of each response position, under raw logits (no sampling warpers).
+
+    Only the response positions get logits (`logits_to_keep`): a 3k-token prompt would otherwise
+    materialise a 3k x 152k logit matrix per action.
+    """
     import torch
     import torch.nn.functional as F
 
     device = next(model.parameters()).device
     ids = torch.tensor([prefix + response_ids], device=device)
-    logits = model(input_ids=ids).logits[0, :-1]
-    start = len(prefix) - 1
-    window = F.log_softmax(logits[start : start + len(response_ids)].float(), dim=-1)
-    targets = ids[0, start + 1 : start + 1 + len(response_ids)]
+    keep = len(response_ids) + 1
+    logits = model(input_ids=ids, use_cache=False, logits_to_keep=keep).logits[0, :-1]
+    window = F.log_softmax(logits.float(), dim=-1)
+    targets = torch.tensor(response_ids, device=device, dtype=torch.long)
     selected = window.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
     entropy = -(window.exp() * window).sum(-1)
     return selected, entropy
 
 
-def load_policy(checkpoint: str, *, trainable: bool, load_in_4bit: bool = False):
+def batch_token_logprobs(model, rows: list[tuple[list[int], list[int]]], *, pad_token_id: int, chunk: int = 8) -> list[list[float]]:
+    """log P(response token) for many (prefix, response) rows, `chunk` rows per left-padded forward.
+
+    Same quantity as `_token_logprobs_entropy` (no gradient), without one forward pass per row.
+    """
+    import torch
+    import torch.nn.functional as F
+
+    device = next(model.parameters()).device
+    out: list[list[float]] = [[] for _ in rows]
+    order = sorted(range(len(rows)), key=lambda i: len(rows[i][0]) + len(rows[i][1]))
+    with torch.no_grad():
+        for start in range(0, len(order), chunk):
+            idx = [i for i in order[start : start + chunk] if rows[i][1]]
+            if not idx:
+                continue
+            seqs = [rows[i][0] + rows[i][1] for i in idx]
+            width = max(len(seq) for seq in seqs)
+            input_ids = torch.tensor([[pad_token_id] * (width - len(seq)) + seq for seq in seqs], device=device)
+            attention = torch.tensor([[0] * (width - len(seq)) + [1] * len(seq) for seq in seqs], device=device, dtype=torch.long)
+            positions = (attention.cumsum(-1) - 1).clamp(min=0)
+            keep = max(len(rows[i][1]) for i in idx) + 1
+            logits = model(input_ids=input_ids, attention_mask=attention, position_ids=positions, use_cache=False, logits_to_keep=keep).logits
+            for j, i in enumerate(idx):
+                response = rows[i][1]
+                window = F.log_softmax(logits[j, keep - 1 - len(response) : keep - 1].float(), dim=-1)
+                targets = torch.tensor(response, device=device, dtype=torch.long)
+                out[i] = window.gather(-1, targets.unsqueeze(-1)).squeeze(-1).cpu().tolist()
+    return out
+
+
+@contextmanager
+def active_adapter(model, name: str):
+    """Temporarily run `model` with adapter `name`; restores the previous adapter and every requires_grad flag
+    (PEFT's set_adapter marks the selected adapter trainable)."""
+    flags = [(parameter, parameter.requires_grad) for parameter in model.parameters()]
+    previous = model.active_adapter
+    model.set_adapter(name)
+    try:
+        yield model
+    finally:
+        model.set_adapter(previous)
+        for parameter, flag in flags:
+            parameter.requires_grad_(flag)
+
+
+def set_train_mode(model) -> None:
+    """Training mode for the backward pass (gradient checkpointing only runs when module.training is set)
+    with dropout kept off, so the loss scores actions with the same policy that sampled them."""
+    import torch
+
+    model.train()
+    for module in model.modules():
+        if isinstance(module, torch.nn.Dropout):
+            module.eval()
+
+
+def load_policy(checkpoint: str, *, trainable: bool, load_in_4bit: bool = False, reference_checkpoint: str | None = None):
+    """Base model + PEFT adapter. With `reference_checkpoint`, that adapter is also loaded, frozen, as
+    REFERENCE_ADAPTER on the same base, so the KL reference costs no second copy of the base model."""
     import torch
     from peft import PeftConfig, PeftModel, prepare_model_for_kbit_training
     from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
@@ -45,8 +112,17 @@ def load_policy(checkpoint: str, *, trainable: bool, load_in_4bit: bool = False)
         kwargs["device_map"] = {"": 0}
     base = AutoModelForCausalLM.from_pretrained(config.base_model_name_or_path, **kwargs)
     if trainable and load_in_4bit:
-        base = prepare_model_for_kbit_training(base)
+        base = prepare_model_for_kbit_training(base)  # also enables (reentrant) gradient checkpointing
+    elif trainable:
+        base.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
     model = PeftModel.from_pretrained(base, root, is_trainable=trainable)
+    if reference_checkpoint is not None:
+        reference = Path(reference_checkpoint).expanduser().resolve()
+        if not (reference / "adapter_config.json").is_file():
+            raise ValueError("reference checkpoint must be a local PEFT adapter directory")
+        if PeftConfig.from_pretrained(reference).base_model_name_or_path != config.base_model_name_or_path:
+            raise ValueError("actor and reference adapters must share the base model")
+        model.load_adapter(str(reference), adapter_name=REFERENCE_ADAPTER, is_trainable=False)
     tokenizer = AutoTokenizer.from_pretrained(root if (root / "tokenizer_config.json").exists() else config.base_model_name_or_path, use_fast=True)
     tokenizer.pad_token = tokenizer.pad_token or tokenizer.eos_token
     tokenizer.padding_side = "left"
@@ -85,18 +161,19 @@ def generate_batch(model, tokenizer, prompts: list[str], *, samples: int, max_ne
         generation.update(temperature=temperature, top_p=top_p)
     with torch.no_grad():
         sequences = model.generate(input_ids=input_ids, attention_mask=attention, **generation)[:, width:]
-    results: list[list[Action]] = [[] for _ in prompts]
     eos = tokenizer.eos_token_id
+    rows: list[tuple[int, list[int]]] = []
     for row, ids in enumerate(sequences):
-        index = row // samples  # generate() repeats each prompt `samples` times in a row
         token_ids = ids.detach().cpu().tolist()
         if eos in token_ids:
             token_ids = token_ids[: token_ids.index(eos) + 1]
-        # Raw behavior-policy probabilities, recomputed without padding or sampling warpers,
-        # with the same float32 path the loss uses so the importance ratio starts at 1.
-        with torch.no_grad():
-            raw, _ = _token_logprobs_entropy(model, prefixes[index], token_ids)
-        results[index].append(Action(tokenizer.decode(token_ids, skip_special_tokens=True).strip(), token_ids, raw.cpu().tolist()))
+        rows.append((row // samples, token_ids))  # generate() repeats each prompt `samples` times in a row
+    # Raw behavior-policy probabilities, recomputed without sampling warpers in float32 like the loss, so
+    # the importance ratio starts at 1. Greedy calls (eval) never train and skip it.
+    olds = batch_token_logprobs(model, [(prefixes[index], token_ids) for index, token_ids in rows], pad_token_id=pad) if temperature > 0 else [[] for _ in rows]
+    results: list[list[Action]] = [[] for _ in prompts]
+    for (index, token_ids), old in zip(rows, olds, strict=True):
+        results[index].append(Action(tokenizer.decode(token_ids, skip_special_tokens=True).strip(), token_ids, old))
     return results
 
 

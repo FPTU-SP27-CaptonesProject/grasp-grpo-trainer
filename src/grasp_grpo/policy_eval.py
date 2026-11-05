@@ -18,7 +18,12 @@ from .evaluate import exact, f1
 from .infer import run_example
 from .model import generate_batch, load_policy
 from .reader import add_reader_arguments, reader_from_args
-from .retrieval import BoundRetriever, add_retrieval_arguments, retriever_from_args
+from .retrieval import (
+    BoundRetriever,
+    add_retrieval_arguments,
+    extraction_stats,
+    retriever_from_args,
+)
 
 
 def _mean(values: list[float]) -> float | None:
@@ -104,7 +109,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--max-leaves", type=int, default=4)
     parser.add_argument("--alpha", type=float, default=0.3)
     parser.add_argument("--shaping-scale", type=float, default=0.1)
-    parser.add_argument("--load-in-4bit", action="store_true")
+    parser.add_argument("--load-in-4bit", action="store_true", help="nf4 base (slower generation, less memory); default bf16")
     parser.add_argument("--output", required=True)
     args = parser.parse_args(argv)
     examples = load_eval_examples(args.qa, args.eval_ids)
@@ -124,8 +129,10 @@ def main(argv: list[str] | None = None) -> None:
 
         report["signal_probe"] = signal_probe(make_env, examples[: args.signal_probe], workers=args.workers)
     report.update(checkpoint=str(Path(args.checkpoint).resolve()), reader_protocol=args.reader_protocol, max_steps=args.max_steps)
-    # Documents retrieved with no cached triples give KI nothing to choose from (no extractor here).
+    # Retrieved documents left without triples give KI nothing to choose from; with --extract-triples the
+    # missing ones are extracted on the fly (cache_misses counts them before extraction).
     report["triple_coverage"] = getattr(retriever, "stats", None)
+    report["triple_extraction"] = extraction_stats(retriever)
     batcher.close()
     retriever.close()
     write_json(args.output, report)

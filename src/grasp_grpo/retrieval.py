@@ -71,7 +71,8 @@ class DenseRetriever:
         if self.triple_db:
             columns = {row[1] for row in self.triple_db.execute("PRAGMA table_info(triples)")}
             self.triple_schema = "project_a" if "triples" in columns else "rows"
-        self.stats = {"docs": 0, "docs_without_triples": 0}
+        self.stats = {"docs": 0, "docs_without_triples": 0, "cache_misses": 0}
+        self.extractor = None  # grasp_grpo.extractor.TripleExtractor: fills documents missing from the cache
 
     def _encode(self, texts: list[str]):
         import numpy as np
@@ -83,7 +84,10 @@ class DenseRetriever:
         """Project A grasp.retrieval.encoder.passage_text."""
         return f"{item['title']}. {item['text']}" if item["title"] else item["text"]
 
-    def search(self, query: str) -> list[dict[str, Any]]:
+    def search(self, query: str, *, fill: bool = True) -> list[dict[str, Any]]:
+        """Top-k passages with their cached triples. Documents missing from the cache are extracted
+        when an extractor is set; `fill=False` leaves that (and `record`) to the caller, which
+        BoundRetriever does outside its lock."""
         import numpy as np
 
         vector = self._encode([self.query_prefix + query])
@@ -108,12 +112,24 @@ class DenseRetriever:
             result.append(item)
         if self.triple_db and result:
             self._attach_triples(result)
+            if fill:
+                if self.extractor is not None:
+                    self.extractor.fill(result)
+                self.record(result)
         return result
+
+    def record(self, result: list[dict[str, Any]]) -> None:
+        """Coverage counters, after any extraction."""
+        if not self.triple_db:
+            return
+        self.stats["docs"] += len(result)
+        self.stats["docs_without_triples"] += sum(1 for item in result if not item["triples"])
 
     def _attach_triples(self, result: list[dict[str, Any]]) -> None:
         ids = [x["doc_id"] for x in result]
         marks = ",".join("?" for _ in ids)
         triples: dict[str, list[dict[str, str]]] = {x: [] for x in ids}
+        cached: set[str] = set()
         if self.triple_schema == "project_a":
             # Project A cache: one JSON list of [head, relation, tail] per (doc_id, extractor model).
             seen: set[str] = set()
@@ -121,15 +137,19 @@ class DenseRetriever:
                 if doc_id in seen:  # one extractor model per document
                     continue
                 seen.add(doc_id)
+                cached.add(str(doc_id))
                 for head, relation, tail in json.loads(payload):
                     triples[str(doc_id)].append({"doc_id": str(doc_id), "head": str(head), "relation": str(relation), "tail": str(tail)})
         else:
             for doc_id, head, relation, tail in self.triple_db.execute(f"SELECT doc_id, head, relation, tail FROM triples WHERE doc_id IN ({marks})", ids):
+                cached.add(str(doc_id))
                 triples[str(doc_id)].append({"doc_id": str(doc_id), "head": str(head), "relation": str(relation), "tail": str(tail)})
         for item in result:
             item["triples"] = triples[item["doc_id"]]
-        self.stats["docs"] += len(result)
-        self.stats["docs_without_triples"] += sum(1 for item in result if not item["triples"])
+            if item["doc_id"] not in cached:
+                self.stats["cache_misses"] += 1
+                if self.extractor is not None:
+                    item["needs_triples"] = True
 
     def candidate_triples(self, query: str, passages: list[dict[str, Any]], question: str | None = None) -> list[dict[str, Any]]:
         """Project A grasp.kg.rank.rank_triples: dedupe, rank by E5 against "question query", keep the top ones."""
@@ -153,6 +173,9 @@ class DenseRetriever:
         self.db.close()
         if self.triple_db:
             self.triple_db.close()
+        if self.extractor is not None:
+            self.extractor.close()
+            self.extractor = None
 
 
 class CorpusRouter:
@@ -180,16 +203,21 @@ class CorpusRouter:
             raise KeyError(f"example {example.get('id')} has dataset={dataset!r}; corpus config has {known}")
         self.current = self.retrievers[dataset]
 
-    def search(self, query: str) -> list[dict[str, Any]]:
+    def search(self, query: str, *, fill: bool = True) -> list[dict[str, Any]]:
         if self.current is None: raise RuntimeError("select(example) must be called before retrieval")
-        return self.current.search(query)
+        return self.current.search(query, fill=fill)
 
     def candidate_triples(self, query: str, passages: list[dict[str, Any]], question: str | None = None) -> list[dict[str, Any]]:
         if self.current is None: raise RuntimeError("select(example) must be called before retrieval")
         return self.current.candidate_triples(query, passages, question=question)
 
     def close(self) -> None:
-        for retriever in self.retrievers.values(): retriever.close()
+        extractors = {id(r.extractor): r.extractor for r in self.retrievers.values() if r.extractor is not None}
+        for retriever in self.retrievers.values():
+            retriever.extractor = None
+            retriever.close()
+        for extractor in extractors.values():
+            extractor.close()
 
 
 class BoundRetriever:
@@ -209,7 +237,14 @@ class BoundRetriever:
     def search(self, query: str) -> list[dict[str, Any]]:
         with self.lock:
             self._bind()
-            return self.retriever.search(query)
+            target = getattr(self.retriever, "current", None) or self.retriever
+            if getattr(target, "extractor", None) is None:
+                return self.retriever.search(query)
+            result = target.search(query, fill=False)
+        target.extractor.fill(result)  # Bedrock calls run outside the lock; other rollouts keep going
+        with self.lock:
+            target.record(result)
+        return result
 
     def candidate_triples(self, query: str, passages: list[dict[str, Any]], question: str | None = None) -> list[dict[str, Any]]:
         with self.lock:
@@ -228,6 +263,9 @@ def add_retrieval_arguments(parser) -> None:
     parser.add_argument("--retrieval-candidates", type=int, default=100, help="FAISS rows re-scored exactly before keeping top-k")
     parser.add_argument("--nprobe", type=int, default=64)
     parser.add_argument("--no-rescore", action="store_true")
+    from .extractor import add_extraction_arguments
+
+    add_extraction_arguments(parser)
 
 
 def retriever_from_args(args) -> DenseRetriever | CorpusRouter:
@@ -235,5 +273,41 @@ def retriever_from_args(args) -> DenseRetriever | CorpusRouter:
         raise ValueError("provide exactly one of --index-dir or --corpus-config")
     extra = {"candidates": getattr(args, "retrieval_candidates", 100), "nprobe": getattr(args, "nprobe", 64), "rescore": not getattr(args, "no_rescore", False)}
     if args.corpus_config:
-        return CorpusRouter(args.corpus_config, args.encoder, top_k=args.top_k, max_candidate_triples=args.max_candidate_triples, **extra)
-    return DenseRetriever(args.index_dir, args.encoder, top_k=args.top_k, max_candidate_triples=args.max_candidate_triples, triple_cache=args.triple_cache, **extra)
+        retriever = CorpusRouter(args.corpus_config, args.encoder, top_k=args.top_k, max_candidate_triples=args.max_candidate_triples, **extra)
+    else:
+        retriever = DenseRetriever(args.index_dir, args.encoder, top_k=args.top_k, max_candidate_triples=args.max_candidate_triples, triple_cache=args.triple_cache, **extra)
+    if getattr(args, "extract_triples", False):
+        attach_extractor(retriever, model=args.extract_model, budget_usd=args.extract_budget_usd, concurrency=args.extract_concurrency)
+    return retriever
+
+
+def _children(retriever) -> list[DenseRetriever]:
+    return list(retriever.retrievers.values()) if isinstance(retriever, CorpusRouter) else [retriever]
+
+
+def attach_extractor(retriever, **kwargs) -> None:
+    """One extractor per triple cache file (the Vast layout shares one cache across corpora)."""
+    from .extractor import TripleExtractor
+
+    by_cache: dict[Path, TripleExtractor] = {}
+    for child in _children(retriever):
+        if child.triple_db is None:
+            continue
+        path = Path(child.triple_db.execute("PRAGMA database_list").fetchone()[2]).resolve()
+        if child.triple_schema != "project_a":
+            raise ValueError(f"{path}: triple extraction needs a Project A cache (triples table with a JSON column)")
+        if path not in by_cache:
+            by_cache[path] = TripleExtractor(str(path), **kwargs)
+        child.extractor = by_cache[path]
+
+
+def extraction_stats(retriever) -> dict[str, Any] | None:
+    """Summed extractor counters (requests, extracted/empty/failed documents, tokens, USD), or None."""
+    extractors = {id(c.extractor): c.extractor for c in _children(retriever) if getattr(c, "extractor", None) is not None}
+    if not extractors:
+        return None
+    total: dict[str, Any] = {}
+    for extractor in extractors.values():
+        for key, value in extractor.stats.items():
+            total[key] = total.get(key, 0) + value
+    return total

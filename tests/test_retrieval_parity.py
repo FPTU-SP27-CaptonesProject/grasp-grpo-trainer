@@ -82,7 +82,7 @@ def test_reads_project_a_triple_cache_and_counts_misses(passages, tmp_path):
     assert by_id["d1"]["triples"] == [{"doc_id": "d1", "head": "Y", "relation": "has", "tail": "beta"}]
     assert len(by_id["d0"]["triples"]) == 2
     assert by_id["d2"]["triples"] == []
-    assert retriever.stats == {"docs": 3, "docs_without_triples": 1}
+    assert retriever.stats == {"docs": 3, "docs_without_triples": 1, "cache_misses": 1}
 
 
 def test_reads_legacy_four_column_cache(passages, tmp_path):
