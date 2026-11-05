@@ -16,7 +16,7 @@ class FakeRouter:
     def search(self, query):
         return [{"doc_id": f"{self.current}:{query}"}]
 
-    def candidate_triples(self, query, passages):
+    def candidate_triples(self, query, passages, question=None):
         return [{"corpus": self.current}]
 
 

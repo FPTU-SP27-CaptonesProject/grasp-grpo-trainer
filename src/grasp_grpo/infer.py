@@ -45,7 +45,7 @@ def run_example(generate_fn, reader, retriever, example: dict, max_steps: int) -
         actions.append({"role": "qf", "response": text, "valid_format": valid_qf, "validation_error": error})
         query = str(qf.get("query") or question) if valid_qf else question
         passages = retriever.search(query)
-        candidates = retriever.candidate_triples(query, passages)
+        candidates = retriever.candidate_triples(query, passages, question=question)
         if not candidates:
             continue
         ki_state = {"question": question, "chain": qf.get("chain", []) if valid_qf else [], "query": query, "candidates": candidates}

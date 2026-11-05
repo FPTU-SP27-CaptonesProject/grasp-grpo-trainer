@@ -33,7 +33,7 @@ class FakeRetriever:
             return [{"doc_id": "gold", "title": "Gold", "text": "evidence", "triples": [{"doc_id": "gold", "head": "Gold", "relation": "answers", "tail": "answer"}]}]
         return [{"doc_id": "other", "title": "Other", "text": "noise", "triples": []}]
 
-    def candidate_triples(self, _query, passages):
+    def candidate_triples(self, _query, passages, question=None):
         return [triple for passage in passages for triple in passage["triples"]]
 
 

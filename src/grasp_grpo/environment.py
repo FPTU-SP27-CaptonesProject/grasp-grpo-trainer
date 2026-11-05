@@ -143,7 +143,7 @@ class BinaryTreeEnvironment:
                 else:
                     qf_gain = 0.0
                 self._shape(qf, query_recall_gain=qf_gain)
-                candidates = self.retriever.candidate_triples(query, passages)
+                candidates = self.retriever.candidate_triples(query, passages, question=node.question)
                 if candidates:
                     ki_state = {"question": node.question, "chain": parsed_qf.get("chain", []) if parsed_qf else [], "query": query, "candidates": candidates}
                     ki = self._sample("ki", ki_state, 1)[0]

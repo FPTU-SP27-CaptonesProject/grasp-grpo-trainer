@@ -110,6 +110,8 @@ def main(argv: list[str] | None = None) -> None:
 
         report["signal_probe"] = signal_probe(make_env, examples[: args.signal_probe], workers=args.workers)
     report.update(checkpoint=str(Path(args.checkpoint).resolve()), reader_protocol=args.reader_protocol, max_steps=args.max_steps)
+    # Documents retrieved with no cached triples give KI nothing to choose from (no extractor here).
+    report["triple_coverage"] = getattr(retriever, "stats", None)
     batcher.close()
     retriever.close()
     write_json(args.output, report)

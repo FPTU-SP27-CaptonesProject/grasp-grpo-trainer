@@ -22,7 +22,7 @@ class Retriever:
     def search(self, query):
         return [{"doc_id": "gold" if query == "gold query" else "q", "title": "", "text": ""}]
 
-    def candidate_triples(self, query, passages):
+    def candidate_triples(self, query, passages, question=None):
         return [{"doc_id": p["doc_id"], "head": "H", "relation": "r", "tail": "T"} for p in passages]
 
 

@@ -48,7 +48,7 @@ def main() -> None:
             qf, valid, _ = act(proxy, tokenizer, "qf", state)
             query = str(qf.get("query") or question) if valid else question
             passages = retriever.search(query)
-            candidates = retriever.candidate_triples(query, passages)
+            candidates = retriever.candidate_triples(query, passages, question=question)
             if not candidates:
                 continue
             selected, valid, _ = act(proxy, tokenizer, "ki", {"question": question, "chain": qf.get("chain", []) if valid else [], "query": query, "candidates": candidates})

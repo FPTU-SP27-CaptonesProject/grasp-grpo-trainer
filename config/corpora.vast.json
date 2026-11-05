@@ -1,0 +1,14 @@
+{
+  "2wiki_ircot": {
+    "index_dir": "/workspace/data/grasp-retrieval/2wiki_ircot",
+    "triple_cache": "/workspace/data/grasp-retrieval/cache/triples.sqlite"
+  },
+  "hotpotqa_abstracts_2017": {
+    "index_dir": "/workspace/data/grasp-retrieval/hotpotqa_abstracts_2017",
+    "triple_cache": "/workspace/data/grasp-retrieval/cache/triples.sqlite"
+  },
+  "wiki18": {
+    "index_dir": "/workspace/data/grasp-retrieval/wiki18",
+    "triple_cache": "/workspace/data/grasp-retrieval/cache/triples.sqlite"
+  }
+}

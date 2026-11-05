@@ -39,9 +39,14 @@ reader instance's mapped public URL only when the reader is hosted on a separate
 The setup script creates a separate `READER_VENV` for vLLM because its dependency versions conflict
 with the stable Transformers/PEFT stack used by the GRPO trainer.
 
-Build the three compatible SQLite triple caches from the downloaded teacher trajectories before
-training: `bash scripts/build_triple_caches_vast.sh`. Point the corpus config's `triple_cache`
-entries at `/workspace/data/grasp-triples/{2wiki,hotpotqa,wiki18}.sqlite`.
+Download the adapter, corpora, triple cache and gold-evidence QA with
+`bash scripts/fetch_data_vast.sh`, then use `CORPUS_CONFIG=config/corpora.vast.json`. Retrieval
+reproduces Project A (`configs/retriever/e5_large.yaml` there): FAISS with `nprobe=64` returns 100
+candidates, which are re-scored by re-encoding `title. text`, keeping the top 10. Triples come from
+Project A's shared cache (`doancuavahk/grasp-retrieval`, `cache/triples.sqlite`); documents missing
+from it give KI no candidates (there is no extractor here), and `grasp-eval-policy` reports the
+share under `triple_coverage`. `scripts/build_triple_caches_vast.sh` (triples from teacher
+trajectories only) is kept for the legacy layout.
 
 ## Gold-evidence GRPO data
 
@@ -95,8 +100,8 @@ Start a frozen OpenAI-compatible Qwen2.5-7B reader endpoint, then validate artif
 
 ```powershell
 grasp-grpo-validate --checkpoint /workspace/checkpoints/grasp-qwen2.5-3b-sft `
-  --index-dir /workspace/data/grasp-retrieval/hotpotqa_ircot `
-  --triple-cache /workspace/data/grasp-retrieval/hotpotqa_ircot/triples.sqlite
+  --index-dir /workspace/data/grasp-retrieval/hotpotqa_abstracts_2017 `
+  --triple-cache /workspace/data/grasp-retrieval/cache/triples.sqlite
 ```
 
 ## Smoke rollout
@@ -107,8 +112,8 @@ the actor receives an update.
 ```powershell
 grasp-grpo-rollout --checkpoint /workspace/checkpoints/grasp-qwen2.5-3b-sft `
   --qa /workspace/data/train.jsonl `
-  --index-dir /workspace/data/grasp-retrieval/hotpotqa_ircot `
-  --triple-cache /workspace/data/grasp-retrieval/hotpotqa_ircot/triples.sqlite `
+  --index-dir /workspace/data/grasp-retrieval/hotpotqa_abstracts_2017 `
+  --triple-cache /workspace/data/grasp-retrieval/cache/triples.sqlite `
   --reader-model Qwen/Qwen2.5-7B-Instruct --output outputs/smoke-tree.json --limit 1
 ```
 
@@ -117,8 +122,8 @@ grasp-grpo-rollout --checkpoint /workspace/checkpoints/grasp-qwen2.5-3b-sft `
 ```powershell
 grasp-train-grpo --sft-checkpoint /workspace/checkpoints/grasp-qwen2.5-3b-sft `
   --qa /workspace/data/train.jsonl `
-  --index-dir /workspace/data/grasp-retrieval/hotpotqa_ircot `
-  --triple-cache /workspace/data/grasp-retrieval/hotpotqa_ircot/triples.sqlite `
+  --index-dir /workspace/data/grasp-retrieval/hotpotqa_abstracts_2017 `
+  --triple-cache /workspace/data/grasp-retrieval/cache/triples.sqlite `
   --reader-model Qwen/Qwen2.5-7B-Instruct `
   --output-dir /workspace/outputs/grpo --iterations 100
 ```
@@ -126,13 +131,7 @@ grasp-train-grpo --sft-checkpoint /workspace/checkpoints/grasp-qwen2.5-3b-sft `
 For one mixed training file spanning all three corpora, provide `--corpus-config` instead of
 `--index-dir` and `--triple-cache`. Its keys must exactly equal each example's `dataset` field:
 
-```json
-{
-  "hotpotqa_ircot": {"index_dir": "/workspace/data/grasp-retrieval/hotpotqa_ircot", "triple_cache": "/workspace/data/grasp-retrieval/hotpotqa_ircot/triples.sqlite"},
-  "2wiki_ircot": {"index_dir": "/workspace/data/grasp-retrieval/2wiki_ircot", "triple_cache": "/workspace/data/grasp-retrieval/2wiki_ircot/triples.sqlite"},
-  "wiki18_ircot": {"index_dir": "/workspace/data/grasp-retrieval/wiki18_ircot", "triple_cache": "/workspace/data/grasp-retrieval/wiki18_ircot/triples.sqlite"}
-}
-```
+`config/corpora.vast.json` is that mapping for the Hugging Face layout.
 
 For every iteration, the trainer samples a fresh tree using the current actor, scores all leaves,
 normalizes rewards within that question/tree, then applies one clipped GRPO update plus KL to the
