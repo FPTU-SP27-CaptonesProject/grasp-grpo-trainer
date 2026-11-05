@@ -7,12 +7,13 @@ for key in SFT_CHECKPOINT CORPUS_CONFIG READER_URL READER_API_KEY READER_MODEL E
 RUN="$OUTPUT_ROOT/stage0"
 start_logging "$RUN"
 reader_args
+quant_args
 for protocol in grasp legacy; do
   probe=()
   [[ "$protocol" == grasp ]] && probe=(--signal-probe 50)
   CUDA_VISIBLE_DEVICES="$TRAIN_GPU" grasp-eval-policy \
     --checkpoint "$SFT_CHECKPOINT" --qa "$EVAL_QA" --eval-ids "$EVAL_IDS" --corpus-config "$CORPUS_CONFIG" \
-    "${READER_ARGS[@]}" --reader-protocol "$protocol" \
+    "${READER_ARGS[@]}" "${QUANT_ARGS[@]}" --reader-protocol "$protocol" \
     --max-steps "$MAX_STEPS" --workers "$WORKERS" --max-leaves "$MAX_LEAVES" \
     --alpha "$ALPHA" --shaping-scale "$SHAPING_SCALE" "${probe[@]}" \
     --output "$RUN/stage0_${protocol}.json"

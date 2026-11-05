@@ -56,6 +56,13 @@ start_logging() {
   trap 'kill "$GPU_MONITOR_PID" 2>/dev/null || true' EXIT
 }
 
+# The SFT adapter was trained with QLoRA (nf4 base): load the policy the same way (and it fits a 24GB card).
+quant_args() {
+  QUANT_ARGS=()
+  [[ "${LOAD_IN_4BIT:-1}" == "1" ]] && QUANT_ARGS=(--load-in-4bit)
+  return 0
+}
+
 reader_args() {
   READER_ARGS=(--reader-url "$READER_URL" --reader-api-key "$READER_API_KEY" --reader-model "$READER_MODEL")
 }
@@ -63,7 +70,8 @@ reader_args() {
 # Flags shared by every grasp-train-grpo call, built from vast.env.
 train_args() {
   reader_args
-  TRAIN_ARGS=(--sft-checkpoint "$SFT_CHECKPOINT" --corpus-config "$CORPUS_CONFIG" "${READER_ARGS[@]}"
+  quant_args
+  TRAIN_ARGS=(--sft-checkpoint "$SFT_CHECKPOINT" --corpus-config "$CORPUS_CONFIG" "${READER_ARGS[@]}" "${QUANT_ARGS[@]}"
     --reader-protocol "${READER_PROTOCOL:-grasp}" --workers "$WORKERS"
     --branch-factor "$BRANCH_FACTOR" --max-steps "$MAX_STEPS" --max-leaves "$MAX_LEAVES"
     --alpha "$ALPHA" --shaping-scale "$SHAPING_SCALE" --retrieval-cost "${RETRIEVAL_COST:-0.0}"
