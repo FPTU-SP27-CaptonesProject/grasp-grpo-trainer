@@ -93,7 +93,7 @@ class BinaryTreeEnvironment:
         result = []
         for action in actions:
             parsed, valid, error = parse(role, action.text)
-            result.append({"role": role, "prompt": text_prompt, "response": action.text, "parsed_action": parsed, "valid_format": valid, "validation_error": error, "response_token_ids": action.token_ids, "old_token_logprobs": action.token_logprobs, "old_logprob_sum": float(sum(action.token_logprobs)), "behavior_policy_checkpoint": self.behavior_checkpoint})
+            result.append({"role": role, "prompt": text_prompt, "response": action.text, "parsed_action": parsed, "valid_format": valid, "validation_error": error, "response_token_ids": action.token_ids, "old_token_logprobs": action.token_logprobs, "old_logprob_sum": float(sum(action.token_logprobs)) if action.token_logprobs else None, "behavior_policy_checkpoint": self.behavior_checkpoint})
         return result
 
     def _leaf(self, node: TreeNode, reason: str) -> TreeNode:
@@ -174,7 +174,8 @@ class BinaryTreeEnvironment:
         return children
 
     def run(self, example: dict[str, Any]) -> dict[str, Any]:
-        self.actor.eval()
+        if self.actor is not None:  # None when a vLLM server generates
+            self.actor.eval()
         select = getattr(self.retriever, "select", None)
         if select is not None:
             select(example)

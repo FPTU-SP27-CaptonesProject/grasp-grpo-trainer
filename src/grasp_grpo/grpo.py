@@ -73,11 +73,20 @@ def grpo_backward(actor, reference, tokenizer, leaves: list[dict], *, clip_low: 
 
 
 def _backward(actor, tokenizer, entries, refs, total_tokens: int, device, *, clip_low: float, clip_high: float, kl_beta: float) -> dict[str, float]:
+    """Old log-probs = the loss's own detached log-probs. Valid because every rollout batch gets exactly one
+    optimizer step, so the weights that sampled are the weights being scored (ratio 1, gradient = advantage x
+    grad log p, the same as recomputing them at sampling time). The sampler's log-probs, when the action has
+    them (vLLM), only feed `sampler_logprob_gap`: mean |HF - sampler| per token, a weight-sync check."""
     sums = {"loss": 0.0, "ratio": 0.0, "clipped": 0.0, "kl": 0.0, "entropy": 0.0}
+    gap_sum, gap_tokens = 0.0, 0
     for (action, advantage), ref_values in zip(entries, refs, strict=True):
         logp, entropy = response_logprob_entropy(actor, tokenizer, action["prompt"], action["response_token_ids"])
         ref = torch.tensor(ref_values, device=device, dtype=logp.dtype)
-        old = torch.tensor(action["old_token_logprobs"], device=device, dtype=logp.dtype)
+        old = logp.detach()
+        sampler = action.get("old_token_logprobs") or []
+        if len(sampler) == len(action["response_token_ids"]):
+            gap_sum += float((old - torch.tensor(sampler, device=device, dtype=old.dtype)).abs().sum())
+            gap_tokens += len(sampler)
         loss, stats = token_loss(logp, old, ref, torch.tensor(advantage, device=device, dtype=logp.dtype), clip_low=clip_low, clip_high=clip_high, kl_beta=kl_beta)
         (loss / total_tokens).backward()
         sums["loss"] += float(loss.detach())
@@ -85,4 +94,7 @@ def _backward(actor, tokenizer, entries, refs, total_tokens: int, device, *, cli
         sums["clipped"] += stats["clipped"]
         sums["kl"] += stats["kl_sum"]
         sums["entropy"] += float(entropy.detach().sum())
-    return {"loss": sums["loss"] / total_tokens, "ratio": sums["ratio"] / total_tokens, "clip_frac": sums["clipped"] / total_tokens, "kl": sums["kl"] / total_tokens, "entropy": sums["entropy"] / total_tokens, "tokens": float(total_tokens), "action_count": float(len(entries))}
+    stats = {"loss": sums["loss"] / total_tokens, "ratio": sums["ratio"] / total_tokens, "clip_frac": sums["clipped"] / total_tokens, "kl": sums["kl"] / total_tokens, "entropy": sums["entropy"] / total_tokens, "tokens": float(total_tokens), "action_count": float(len(entries))}
+    if gap_tokens:
+        stats["sampler_logprob_gap"] = gap_sum / gap_tokens
+    return stats

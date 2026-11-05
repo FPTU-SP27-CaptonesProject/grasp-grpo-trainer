@@ -16,7 +16,8 @@ from .environment import BinaryTreeEnvironment
 from .eval_ids import load_eval_examples
 from .evaluate import exact, f1
 from .infer import run_example
-from .model import generate_batch, load_policy
+from .model import generate_batch, load_policy, load_tokenizer
+from .policy_server import VLLMPolicy, add_policy_arguments
 from .reader import add_reader_arguments, reader_from_args
 from .retrieval import (
     BoundRetriever,
@@ -99,6 +100,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--eval-ids")
     add_retrieval_arguments(parser)
     add_reader_arguments(parser)
+    add_policy_arguments(parser)
     parser.add_argument("--max-steps", type=int, default=5)
     parser.add_argument("--workers", type=int, default=16)
     parser.add_argument("--max-batch", type=int, default=32)
@@ -116,24 +118,31 @@ def main(argv: list[str] | None = None) -> None:
     if args.limit is not None:
         examples = examples[: args.limit]
     retriever = retriever_from_args(args)
-    actor, tokenizer, _ = load_policy(args.checkpoint, trainable=False, load_in_4bit=args.load_in_4bit)
+    batcher = None
+    if args.policy_url:  # the server already serves --checkpoint as --policy-model
+        actor, tokenizer = None, load_tokenizer(args.checkpoint)
+        generate = VLLMPolicy(args.policy_url, args.policy_api_key, tokenizer, model=args.policy_model).generate
+    else:
+        actor, tokenizer, _ = load_policy(args.checkpoint, trainable=False, load_in_4bit=args.load_in_4bit)
+        batcher = GenerationBatcher(lambda prompts, **kwargs: generate_batch(actor, tokenizer, prompts, **kwargs), max_batch=args.max_batch)
+        generate = batcher.generate
     reader = reader_from_args(args)
-    batcher = GenerationBatcher(lambda prompts, **kwargs: generate_batch(actor, tokenizer, prompts, **kwargs), max_batch=args.max_batch)
-    report = evaluate_policy(role_generate_fn(batcher.generate, temperature=0.0, top_p=1.0), reader, retriever, examples, max_steps=args.max_steps, workers=args.workers)
+    report = evaluate_policy(role_generate_fn(generate, temperature=0.0, top_p=1.0), reader, retriever, examples, max_steps=args.max_steps, workers=args.workers)
     if args.signal_probe:
         lock = threading.Lock()
-        sample_fn = role_generate_fn(batcher.generate, temperature=args.temperature, top_p=args.top_p)
+        sample_fn = role_generate_fn(generate, temperature=args.temperature, top_p=args.top_p)
 
         def make_env(example):
             return BinaryTreeEnvironment(actor, tokenizer, reader, BoundRetriever(retriever, example, lock), branch_factor=2, max_steps=args.max_steps, max_leaves=args.max_leaves, temperature=args.temperature, top_p=args.top_p, alpha=args.alpha, retrieval_cost=0.0, behavior_checkpoint=str(Path(args.checkpoint).resolve()), shaping_scale=args.shaping_scale, generate_fn=sample_fn)
 
         report["signal_probe"] = signal_probe(make_env, examples[: args.signal_probe], workers=args.workers)
-    report.update(checkpoint=str(Path(args.checkpoint).resolve()), reader_protocol=args.reader_protocol, max_steps=args.max_steps)
+    report.update(checkpoint=str(Path(args.checkpoint).resolve()), reader_protocol=args.reader_protocol, max_steps=args.max_steps, generation="vllm" if args.policy_url else ("hf-nf4" if args.load_in_4bit else "hf-bf16"))
     # Retrieved documents left without triples give KI nothing to choose from; with --extract-triples the
     # missing ones are extracted on the fly (cache_misses counts them before extraction).
     report["triple_coverage"] = getattr(retriever, "stats", None)
     report["triple_extraction"] = extraction_stats(retriever)
-    batcher.close()
+    if batcher is not None:
+        batcher.close()
     retriever.close()
     write_json(args.output, report)
     print(json.dumps({key: value for key, value in report.items() if key != "per_question"}))

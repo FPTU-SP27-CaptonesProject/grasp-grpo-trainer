@@ -30,7 +30,7 @@ def gate_stage0(report: dict[str, Any], *, min_f1: float = 0.30, max_zero_signal
     return not reasons, reasons
 
 
-def gate_stage1(metrics: list[dict[str, Any]], *, adapter_changed: bool, ratio_range: tuple[float, float] = (0.9, 1.1), max_kl: float = 0.05) -> tuple[bool, list[str]]:
+def gate_stage1(metrics: list[dict[str, Any]], *, adapter_changed: bool, ratio_range: tuple[float, float] = (0.9, 1.1), max_kl: float = 0.05, max_sampler_gap: float = 0.5) -> tuple[bool, list[str]]:
     updated = [m for m in metrics if m.get("updated")]
     if not updated:
         return False, ["no step produced an update"]
@@ -47,6 +47,9 @@ def gate_stage1(metrics: list[dict[str, Any]], *, adapter_changed: bool, ratio_r
         reasons.append("zero gradient norm")
     if not adapter_changed:
         reasons.append("LoRA weights did not change")
+    gaps = [m["sampler_logprob_gap"] for m in updated if m.get("sampler_logprob_gap") is not None]
+    if gaps and max(gaps[len(gaps) // 2 :]) > max_sampler_gap:
+        reasons.append(f"vLLM and trainer disagree on token log-probs (gap {max(gaps):.3f} > {max_sampler_gap}): the server is not sampling from the trained adapter")
     return not reasons, reasons
 
 

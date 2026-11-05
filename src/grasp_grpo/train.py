@@ -25,6 +25,7 @@ from .eval_ids import load_eval_examples
 from .grpo import grpo_backward
 from .model import generate_batch, load_policy
 from .policy_eval import evaluate_policy
+from .policy_server import VLLMPolicy, add_policy_arguments
 from .reader import add_reader_arguments, reader_from_args
 from .retrieval import (
     BoundRetriever,
@@ -42,6 +43,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--qa", required=True)
     add_retrieval_arguments(p)
     add_reader_arguments(p)
+    add_policy_arguments(p)
     p.add_argument("--output-dir", required=True)
     # batch and schedule
     p.add_argument("--iterations", type=int, default=300)
@@ -159,9 +161,17 @@ def main(argv: list[str] | None = None) -> None:
     optimizer = torch.optim.AdamW(params, lr=args.learning_rate)
     reader = reader_from_args(args)
     lock = threading.Lock()
-    batcher = GenerationBatcher(lambda prompts, **kwargs: generate_batch(actor, tokenizer, prompts, **kwargs), max_batch=args.max_batch)
-    sample_fn = role_generate_fn(batcher.generate, temperature=args.temperature, top_p=args.top_p)
-    greedy_fn = role_generate_fn(batcher.generate, temperature=0.0, top_p=1.0)
+    policy, batcher = None, None
+    if args.policy_url:
+        policy = VLLMPolicy(args.policy_url, args.policy_api_key, tokenizer, model=args.policy_model)
+        if args.actor_checkpoint:  # the server starts from the SFT adapter; continue from this one instead
+            policy.update(save_adapter(actor, tokenizer, output / "live" / "step-000000", {"step": 0}), "policy-000000")
+        generate = policy.generate
+    else:
+        batcher = GenerationBatcher(lambda prompts, **kwargs: generate_batch(actor, tokenizer, prompts, **kwargs), max_batch=args.max_batch)
+        generate = batcher.generate
+    sample_fn = role_generate_fn(generate, temperature=args.temperature, top_p=args.top_p)
+    greedy_fn = role_generate_fn(generate, temperature=0.0, top_p=1.0)
     stopper = EarlyStopper(StopConfig(min_improvement=args.stop_min_improvement, patience_evals=args.stop_patience_evals, sft_drop=args.stop_sft_drop, sft_drop_evals=args.stop_sft_drop_evals, min_format_rate=args.stop_min_format_rate, max_kl=args.stop_max_kl, min_entropy_ratio=args.stop_min_entropy_ratio, max_zero_signal=args.stop_max_zero_signal, window=args.stop_window, max_hours=args.max_hours), args.sft_f1)
     config = public_config(args)
 
@@ -226,6 +236,10 @@ def main(argv: list[str] | None = None) -> None:
             info["grad_norm"] = float(torch.nn.utils.clip_grad_norm_(params, 1.0))
             optimizer.step()
             info.update(lr=lr, updated=True)
+            if policy is not None:  # the next rollouts must sample from the updated adapter
+                synced = time.monotonic()
+                policy.update(save_adapter(actor, tokenizer, output / "live" / f"step-{step:06d}", {"step": step}), f"policy-{step:06d}")
+                info["sync_seconds"] = time.monotonic() - synced
         else:
             info["updated"] = False
         extraction = extraction_stats(retriever)
@@ -259,7 +273,8 @@ def main(argv: list[str] | None = None) -> None:
         save_adapter(actor, tokenizer, final, {"step": step, "sft_checkpoint": str(Path(args.sft_checkpoint).resolve()), "config": config, "metrics": metrics[-50:]})
     write_json(output / "metrics.json", metrics)
     write_json(output / "run_manifest.json", {"schema_version": "grasp-grpo-tree-v2", "stop_reason": stop_reason, "stop_step": step if stop_reason else None, "completed_steps": step, "sft_f1": stopper.sft_f1, "best_step": stopper.best_step, "best_f1": stopper.best_f1, "best_checkpoint": str(output / "best") if stopper.best_step is not None else None, "final_checkpoint": str(final), "sft_checkpoint": str(Path(args.sft_checkpoint).resolve()), "actor_initialization": str(Path(actor_source).resolve()), "qa": str(Path(args.qa).resolve()), "config": config, "created_at_utc": _now()})
-    batcher.close()
+    if batcher is not None:
+        batcher.close()
     retriever.close()
     print(json.dumps({"stop_reason": stop_reason, "completed_steps": step, "best_step": stopper.best_step, "best_f1": stopper.best_f1, "final_checkpoint": str(final)}))
 

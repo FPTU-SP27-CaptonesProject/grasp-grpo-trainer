@@ -96,12 +96,20 @@ reader_args() {
   READER_ARGS=(--reader-url "$READER_URL" --reader-api-key "$READER_API_KEY" --reader-model "$READER_MODEL")
 }
 
+# Proxy generation on the vLLM policy server (scripts/run_policy_vast.sh); empty POLICY_URL = HF generate.
+policy_args() {
+  POLICY_ARGS=()
+  [[ -n "${POLICY_URL:-}" ]] && POLICY_ARGS=(--policy-url "$POLICY_URL" --policy-api-key "$READER_API_KEY" --policy-model sft)
+  return 0
+}
+
 # Flags shared by every grasp-train-grpo call, built from vast.env.
 train_args() {
   reader_args
   quant_args
   extract_args
-  TRAIN_ARGS=(--sft-checkpoint "$SFT_CHECKPOINT" --corpus-config "$CORPUS_CONFIG" "${READER_ARGS[@]}" "${QUANT_ARGS[@]}" "${EXTRACT_ARGS[@]}"
+  policy_args
+  TRAIN_ARGS=(--sft-checkpoint "$SFT_CHECKPOINT" --corpus-config "$CORPUS_CONFIG" "${READER_ARGS[@]}" "${QUANT_ARGS[@]}" "${EXTRACT_ARGS[@]}" "${POLICY_ARGS[@]}"
     --reader-protocol "${READER_PROTOCOL:-grasp}" --workers "$WORKERS"
     --branch-factor "$BRANCH_FACTOR" --max-steps "$MAX_STEPS" --max-leaves "$MAX_LEAVES"
     --alpha "$ALPHA" --shaping-scale "$SHAPING_SCALE" --retrieval-cost "${RETRIEVAL_COST:-0.0}"

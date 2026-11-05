@@ -98,7 +98,7 @@ def load_policy(checkpoint: str, *, trainable: bool, load_in_4bit: bool = False,
     REFERENCE_ADAPTER on the same base, so the KL reference costs no second copy of the base model."""
     import torch
     from peft import PeftConfig, PeftModel, prepare_model_for_kbit_training
-    from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+    from transformers import AutoModelForCausalLM, BitsAndBytesConfig
 
     root = Path(checkpoint).expanduser().resolve()
     if not root.is_dir() or not (root / "adapter_config.json").is_file():
@@ -123,9 +123,7 @@ def load_policy(checkpoint: str, *, trainable: bool, load_in_4bit: bool = False,
         if PeftConfig.from_pretrained(reference).base_model_name_or_path != config.base_model_name_or_path:
             raise ValueError("actor and reference adapters must share the base model")
         model.load_adapter(str(reference), adapter_name=REFERENCE_ADAPTER, is_trainable=False)
-    tokenizer = AutoTokenizer.from_pretrained(root if (root / "tokenizer_config.json").exists() else config.base_model_name_or_path, use_fast=True)
-    tokenizer.pad_token = tokenizer.pad_token or tokenizer.eos_token
-    tokenizer.padding_side = "left"
+    tokenizer = load_tokenizer(checkpoint)
     if torch.cuda.is_available() and not load_in_4bit:
         model.to("cuda")
     model.train(trainable)
@@ -133,6 +131,19 @@ def load_policy(checkpoint: str, *, trainable: bool, load_in_4bit: bool = False,
         for parameter in model.parameters():
             parameter.requires_grad_(False)
     return model, tokenizer, str(config.base_model_name_or_path)
+
+
+def load_tokenizer(checkpoint: str):
+    """The adapter's tokenizer (or its base model's), left-padded, as every prompt is rendered with."""
+    from peft import PeftConfig
+    from transformers import AutoTokenizer
+
+    root = Path(checkpoint).expanduser().resolve()
+    source = root if (root / "tokenizer_config.json").exists() else PeftConfig.from_pretrained(root).base_model_name_or_path
+    tokenizer = AutoTokenizer.from_pretrained(source, use_fast=True)
+    tokenizer.pad_token = tokenizer.pad_token or tokenizer.eos_token
+    tokenizer.padding_side = "left"
+    return tokenizer
 
 
 def _prompt_ids(tokenizer, prompt: str, max_input_tokens: int = 3072, prompt_head_tokens: int = 768) -> list[int]:
@@ -162,18 +173,14 @@ def generate_batch(model, tokenizer, prompts: list[str], *, samples: int, max_ne
     with torch.no_grad():
         sequences = model.generate(input_ids=input_ids, attention_mask=attention, **generation)[:, width:]
     eos = tokenizer.eos_token_id
-    rows: list[tuple[int, list[int]]] = []
+    results: list[list[Action]] = [[] for _ in prompts]
     for row, ids in enumerate(sequences):
         token_ids = ids.detach().cpu().tolist()
         if eos in token_ids:
             token_ids = token_ids[: token_ids.index(eos) + 1]
-        rows.append((row // samples, token_ids))  # generate() repeats each prompt `samples` times in a row
-    # Raw behavior-policy probabilities, recomputed without sampling warpers in float32 like the loss, so
-    # the importance ratio starts at 1. Greedy calls (eval) never train and skip it.
-    olds = batch_token_logprobs(model, [(prefixes[index], token_ids) for index, token_ids in rows], pad_token_id=pad) if temperature > 0 else [[] for _ in rows]
-    results: list[list[Action]] = [[] for _ in prompts]
-    for (index, token_ids), old in zip(rows, olds, strict=True):
-        results[index].append(Action(tokenizer.decode(token_ids, skip_special_tokens=True).strip(), token_ids, old))
+        # No behaviour log-probs: one update per rollout batch means the loss's own detached log-probs are
+        # exactly the sampling policy's (grpo_backward).
+        results[row // samples].append(Action(tokenizer.decode(token_ids, skip_special_tokens=True).strip(), token_ids, []))
     return results
 
 

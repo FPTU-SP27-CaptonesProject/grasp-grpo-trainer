@@ -34,7 +34,13 @@ bash scripts/smoke_tree_vast.sh
 bash scripts/train_grpo_vast.sh
 ```
 
-`READER_GPU=0` and `TRAIN_GPU=1` target a single two-GPU Vast instance. Set `READER_URL` to the
+`READER_GPU=0` and `TRAIN_GPU=1` target a single two-GPU Vast instance. The 3B proxy generates on a
+second vLLM server on GPU 0 (`bash scripts/run_policy_vast.sh` in another tmux window, started after
+the reader is up; `POLICY_URL`). It serves the SFT adapter as `sft`; after every optimizer step the
+trainer saves the adapter under `<output>/live/` and the server loads it at runtime, so rollouts are
+always on-policy. The loss uses its own detached log-probs as the old ones (one update per rollout
+batch), and `sampler_logprob_gap` in the step log tracks HF/vLLM agreement; stage 1 fails if it is
+large. Leave `POLICY_URL` empty to fall back to HF `generate` on the training GPU. Set `READER_URL` to the
 reader instance's mapped public URL only when the reader is hosted on a separate Vast instance.
 The setup script creates a separate `READER_VENV` for vLLM because its dependency versions conflict
 with the stable Transformers/PEFT stack used by the GRPO trainer.
