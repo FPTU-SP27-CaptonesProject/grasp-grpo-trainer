@@ -16,6 +16,10 @@ source "$ENV_FILE"
 PROJECT_DIR="${PROJECT_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 VENV_DIR="${VENV_DIR:-$PROJECT_DIR/.venv}"
 export PYTHONUNBUFFERED=1
+# Model downloads (vLLM reader, base model, E5) and temp files stay off the small container root disk.
+export HF_HOME="${HF_HOME:-/workspace/.cache/huggingface}" TMPDIR="${TMPDIR:-/workspace/tmp}"   VLLM_CACHE_ROOT="${VLLM_CACHE_ROOT:-/workspace/.cache/vllm}" XDG_CACHE_HOME="${XDG_CACHE_HOME:-/workspace/.cache}"
+export HF_XET_HIGH_PERFORMANCE=1 HF_XET_CHUNK_CACHE_SIZE_BYTES=0
+mkdir -p "$HF_HOME" "$TMPDIR"
 export PYTHONPATH="$PROJECT_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
 
 require_value() {

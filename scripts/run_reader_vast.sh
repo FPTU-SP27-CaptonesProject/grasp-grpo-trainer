@@ -10,6 +10,7 @@ fi
 # shellcheck disable=SC1090
 source "$READER_VENV/bin/activate"
 
+# FP8 = the reader that generated the SFT data and ran the 2026-11-05 SFT eval.
 CUDA_VISIBLE_DEVICES="$READER_GPU" exec vllm serve "$READER_MODEL" \
-  --host 127.0.0.1 --port 8000 --dtype bfloat16 \
-  --gpu-memory-utilization 0.90 --api-key "$READER_API_KEY"
+  --host 127.0.0.1 --port 8000 --dtype bfloat16 --quantization "${READER_QUANTIZATION:-fp8}" \
+  --max-model-len 8192 --gpu-memory-utilization 0.90 --api-key "$READER_API_KEY"
