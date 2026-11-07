@@ -57,6 +57,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--clip-high", type=float, default=0.28)
     p.add_argument("--kl-beta", type=float, default=0.002)
     p.add_argument("--backward-batch-tokens", type=int, default=12288, help="Padded tokens per backward pass (rows x longest row); lower it on out-of-memory")
+    p.add_argument("--async-rollout", action="store_true", help="Sample step t+1 on the vLLM server while step t trains (one step off-policy; old log-probs = the sampler's). Needs --policy-url")
     p.add_argument("--rollout-oversample", type=float, default=1.6, help="Questions started at once per step = questions-per-iteration x this, so zero-signal trees rarely need a second wave")
     # tree and reward
     p.add_argument("--branch-factor", type=int, default=2)
@@ -149,6 +150,8 @@ def main(argv: list[str] | None = None) -> None:
         raise ValueError("branch-factor must be 2")
     if args.iterations < 1 or args.questions_per_iteration < 1 or args.workers < 1:
         raise ValueError("iterations, questions-per-iteration and workers must be positive")
+    if args.async_rollout and not args.policy_url:
+        raise ValueError("--async-rollout needs --policy-url (the HF generator shares the training GPU)")
     output = Path(args.output_dir).resolve()
     output.mkdir(parents=True, exist_ok=True)
     examples = read_examples(args.qa)
@@ -177,10 +180,57 @@ def main(argv: list[str] | None = None) -> None:
     stopper = EarlyStopper(StopConfig(min_improvement=args.stop_min_improvement, patience_evals=args.stop_patience_evals, sft_drop=args.stop_sft_drop, sft_drop_evals=args.stop_sft_drop_evals, min_format_rate=args.stop_min_format_rate, max_kl=args.stop_max_kl, min_entropy_ratio=args.stop_min_entropy_ratio, max_zero_signal=args.stop_max_zero_signal, window=args.stop_window, max_hours=args.max_hours), args.sft_f1)
     config = public_config(args)
 
-    def make_env(example: dict[str, Any], step: int) -> BinaryTreeEnvironment:
-        return BinaryTreeEnvironment(actor, tokenizer, reader, BoundRetriever(retriever, example, lock), branch_factor=2, max_steps=args.max_steps, max_leaves=args.max_leaves, temperature=args.temperature, top_p=args.top_p, alpha=args.alpha, retrieval_cost=args.retrieval_cost, behavior_checkpoint=f"in_memory_actor_before_step_{step}", initial_retrieval=not args.no_initial_retrieval, rd_gain_weight=args.rd_gain_weight, qf_gain_weight=args.qf_gain_weight, ki_hit_weight=args.ki_hit_weight, ki_miss_penalty=args.ki_miss_penalty, shaping_scale=args.shaping_scale, advantage_std_norm=args.advantage_std_norm, generate_fn=sample_fn)
+    env_actor = None if policy is not None else actor  # a server-side policy never touches the training model
+
+    def make_env(example: dict[str, Any], step: int, generate_fn=sample_fn) -> BinaryTreeEnvironment:
+        return BinaryTreeEnvironment(env_actor, tokenizer, reader, BoundRetriever(retriever, example, lock), branch_factor=2, max_steps=args.max_steps, max_leaves=args.max_leaves, temperature=args.temperature, top_p=args.top_p, alpha=args.alpha, retrieval_cost=args.retrieval_cost, behavior_checkpoint=f"in_memory_actor_before_step_{step}", initial_retrieval=not args.no_initial_retrieval, rd_gain_weight=args.rd_gain_weight, qf_gain_weight=args.qf_gain_weight, ki_hit_weight=args.ki_hit_weight, ki_miss_penalty=args.ki_miss_penalty, shaping_scale=args.shaping_scale, advantage_std_norm=args.advantage_std_norm, generate_fn=generate_fn)
 
     pool = ThreadPoolExecutor(max_workers=args.workers)
+    prefetcher = ThreadPoolExecutor(max_workers=1) if args.async_rollout else None
+    max_attempts = math.ceil(args.questions_per_iteration * (1 + args.max_refill_factor))
+    cursor = 0
+
+    def collect(step: int, generate_fn) -> dict[str, Any]:
+        """Streamed dynamic sampling: start questions x oversample trees at once; whenever one finishes without
+        signal, start a replacement while fewer than questions-per-iteration are usable or pending; queued trees
+        are cancelled once the batch is full."""
+        nonlocal cursor
+        collected: list[dict[str, Any]] = []
+        zero_trees: list[dict[str, Any]] = []
+        direct, attempts, extra_trees = 0, 0, 0
+        started_at = time.monotonic()
+        pending: set = set()
+        want = math.ceil(args.questions_per_iteration * max(1.0, args.rollout_oversample))
+        while True:
+            for _ in range(max(0, min(want, max_attempts - attempts))):
+                example = examples[cursor % len(examples)]
+                pending.add(pool.submit(make_env(example, step, generate_fn).run, example))
+                cursor += 1
+                attempts += 1
+            if not pending:
+                break
+            done, pending = wait(pending, return_when=FIRST_COMPLETED)
+            for future in done:
+                tree = future.result()
+                if not any(leaf["actions"] for leaf in tree["leaves"]):
+                    direct += 1  # reader answered directly: no proxy tokens to train
+                elif tree["zero_signal"]:
+                    zero_trees.append(tree)  # all leaves tie: zero advantage, dropped (DAPO dynamic sampling)
+                elif len(collected) < args.questions_per_iteration:
+                    collected.append(tree)
+                else:
+                    extra_trees += 1  # usable but over the batch size: same batch size every step
+            if len(collected) >= args.questions_per_iteration:
+                cancelled = {future for future in pending if future.cancel()}
+                pending -= cancelled
+                attempts -= len(cancelled)
+            want = args.questions_per_iteration - len(collected) - len(pending)
+        return {"collected": collected, "zero_trees": zero_trees, "direct": direct, "attempts": attempts, "extra_trees": extra_trees, "seconds": time.monotonic() - started_at}
+
+    def launch(step: int):
+        """Start the rollouts for `step` in the background, pinned to the adapter the server serves now."""
+        pinned = role_generate_fn(policy.pinned(policy.current()), temperature=args.temperature, top_p=args.top_p)
+        return prefetcher.submit(collect, step, pinned)
 
     eval_history: list[dict[str, Any]] = []
 
@@ -200,48 +250,22 @@ def main(argv: list[str] | None = None) -> None:
     metrics: list[dict[str, Any]] = []
     live_log = output / "metrics.jsonl"  # one line per step, for the live dashboard (metrics.json is only rewritten at saves)
     live_log.write_text("", encoding="utf-8")
-    cursor, stop_reason, step = 0, None, 0
-    max_attempts = math.ceil(args.questions_per_iteration * (1 + args.max_refill_factor))
+    stop_reason, step = None, 0
     started = time.monotonic()
+    upcoming = launch(1) if prefetcher is not None else None
     progress = tqdm(total=args.iterations, desc="GRPO", unit="step", dynamic_ncols=True)
     for step in range(1, args.iterations + 1):
         actor.eval()  # rollouts and ratios use the same dropout-free policy
-        collected: list[dict[str, Any]] = []
-        zero_trees: list[dict[str, Any]] = []
-        direct, attempts, extra_trees = 0, 0, 0
-        rollout_started = time.monotonic()
-        # Streamed dynamic sampling: start questions x oversample trees at once; whenever one finishes without
-        # signal, start a replacement right away while fewer than questions-per-iteration are usable or pending.
-        pending: set = set()
-        want = math.ceil(args.questions_per_iteration * max(1.0, args.rollout_oversample))
-        while True:
-            for _ in range(max(0, min(want, max_attempts - attempts))):
-                example = examples[cursor % len(examples)]
-                pending.add(pool.submit(make_env(example, step).run, example))
-                cursor += 1
-                attempts += 1
-            if not pending:
-                break
-            done, pending = wait(pending, return_when=FIRST_COMPLETED)
-            for future in done:
-                tree = future.result()
-                if not any(leaf["actions"] for leaf in tree["leaves"]):
-                    direct += 1  # reader answered directly: no proxy tokens to train
-                elif tree["zero_signal"]:
-                    zero_trees.append(tree)  # all leaves tie: zero advantage, dropped (DAPO dynamic sampling)
-                elif len(collected) < args.questions_per_iteration:
-                    collected.append(tree)
-                else:
-                    extra_trees += 1  # usable but over the batch size: same batch size every step
-            if len(collected) >= args.questions_per_iteration:  # full: drop queued trees, let running ones finish
-                cancelled = {future for future in pending if future.cancel()}
-                pending -= cancelled
-                attempts -= len(cancelled)
-            want = args.questions_per_iteration - len(collected) - len(pending)
-        rollout_seconds = time.monotonic() - rollout_started
+        waited = time.monotonic()
+        batch = upcoming.result() if prefetcher is not None else collect(step, sample_fn)
+        wait_seconds = time.monotonic() - waited
+        if prefetcher is not None and step < args.iterations:
+            upcoming = launch(step + 1)  # samples with the adapter of step - 1 while this step trains
+        collected, zero_trees, direct = batch["collected"], batch["zero_trees"], batch["direct"]
+        attempts, extra_trees, rollout_seconds = batch["attempts"], batch["extra_trees"], batch["seconds"]
         signal_trees = len(collected) + len(zero_trees)
         zero_fraction = len(zero_trees) / signal_trees if signal_trees else 1.0
-        info: dict[str, Any] = {"step": step, **tree_stats(collected + zero_trees), "zero_signal_groups": len(zero_trees), "zero_signal_fraction": zero_fraction, "direct_answer_trees": direct, "refilled_questions": max(0, attempts - args.questions_per_iteration), "extra_trees": extra_trees, "rollout_seconds": rollout_seconds, "seconds_per_question": rollout_seconds / attempts}
+        info: dict[str, Any] = {"step": step, **tree_stats(collected + zero_trees), "zero_signal_groups": len(zero_trees), "zero_signal_fraction": zero_fraction, "direct_answer_trees": direct, "refilled_questions": max(0, attempts - args.questions_per_iteration), "extra_trees": extra_trees, "rollout_seconds": rollout_seconds, "rollout_wait_seconds": wait_seconds, "seconds_per_question": rollout_seconds / max(attempts, 1)}
         if collected:
             lr = lr_at(step, args.learning_rate, args.warmup_steps)
             for group in optimizer.param_groups:
@@ -249,13 +273,13 @@ def main(argv: list[str] | None = None) -> None:
             optimizer.zero_grad(set_to_none=True)
             leaves = [leaf for tree in collected for leaf in tree["leaves"]]
             backward_started = time.monotonic()
-            info.update(grpo_backward(actor, None, tokenizer, leaves, clip_low=args.clip_low, clip_high=args.clip_high, kl_beta=args.kl_beta, max_batch_tokens=args.backward_batch_tokens))
+            info.update(grpo_backward(actor, None, tokenizer, leaves, clip_low=args.clip_low, clip_high=args.clip_high, kl_beta=args.kl_beta, max_batch_tokens=args.backward_batch_tokens, sampler_old=args.async_rollout))
             info["grad_norm"] = float(torch.nn.utils.clip_grad_norm_(params, 1.0))
             optimizer.step()
             info.update(lr=lr, updated=True, backward_seconds=time.monotonic() - backward_started)
             if policy is not None:  # the next rollouts must sample from the updated adapter
                 synced = time.monotonic()
-                policy.update(save_adapter(actor, tokenizer, output / "live" / f"step-{step:06d}", {"step": step}), f"policy-{step:06d}")
+                policy.update(save_adapter(actor, tokenizer, output / "live" / f"step-{step:06d}", {"step": step}), f"policy-{step:06d}", keep_loaded=2 if args.async_rollout else 1, keep_files=3 if args.async_rollout else 2)
                 info["sync_seconds"] = time.monotonic() - synced
         else:
             info["updated"] = False
@@ -285,6 +309,10 @@ def main(argv: list[str] | None = None) -> None:
             tqdm.write(json.dumps({"early_stop": reason, "step": step}))
             break
     progress.close()
+    if prefetcher is not None:
+        if step < args.iterations:  # stopped early: let the prefetched rollout finish before closing clients
+            upcoming.cancel() or upcoming.exception()
+        prefetcher.shutdown()
     pool.shutdown()
     final = output / f"checkpoint-grpo-step-{step:06d}"
     if not final.exists():

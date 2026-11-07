@@ -117,4 +117,7 @@ train_args() {
     --ki-hit-weight "$KI_HIT_WEIGHT" --ki-miss-penalty "$KI_MISS_PENALTY"
     --learning-rate "$LEARNING_RATE" --warmup-steps "$WARMUP_STEPS"
     --clip-low "$CLIP_LOW" --clip-high "$CLIP_HIGH" --kl-beta "$KL_BETA")
+  # 1 = sample step t+1 on the vLLM server while step t trains (one step off-policy); needs POLICY_URL.
+  if [[ "${ASYNC_ROLLOUT:-0}" == "1" ]]; then TRAIN_ARGS+=(--async-rollout); fi
+  return 0
 }

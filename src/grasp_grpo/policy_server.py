@@ -32,13 +32,16 @@ class VLLMPolicy:
         self._static = model  # served from --lora-modules; never unloaded
         self._lock = threading.Lock()
         self._files: list[Path] = []  # adapter directories this process wrote and loaded, oldest first
+        self._loaded: list[str] = []  # previous (non-static) adapter names still loaded on the server, oldest first
         self.stop_ids = {tokenizer.eos_token_id, *([tokenizer.pad_token_id] if tokenizer.pad_token_id is not None else [])}
 
-    def generate(self, prompt: str, *, samples: int, max_new_tokens: int, temperature: float, top_p: float) -> list[Action]:
+    def generate(self, prompt: str, *, samples: int, max_new_tokens: int, temperature: float, top_p: float, model: str | None = None) -> list[Action]:
+        """Sample from `model` (an adapter name), or from the current adapter when None."""
         if samples > 1 and temperature <= 0:
             raise ValueError("multiple tree branches require temperature > 0")
-        with self._lock:
-            model = self.model
+        if model is None:
+            with self._lock:
+                model = self.model
         request: dict[str, Any] = {"model": model, "prompt": _prompt_ids(self.tokenizer, prompt), "max_tokens": max_new_tokens, "n": samples, "temperature": max(temperature, 0.0), "logprobs": 0, "extra_body": {"return_tokens_as_token_ids": True}}
         if temperature > 0:
             request["top_p"] = top_p
@@ -57,17 +60,28 @@ class VLLMPolicy:
             logprobs = []
         return Action(self.tokenizer.decode(token_ids, skip_special_tokens=True).strip(), token_ids, logprobs)
 
-    def update(self, adapter_dir: str | Path, name: str, *, keep_files: int = 2) -> None:
-        """Serve `adapter_dir` as `name` from now on (call between rollouts). The previously served adapter
-        is unloaded unless it is the server's static one; only the newest `keep_files` directories stay on disk."""
+    def current(self) -> str:
+        with self._lock:
+            return self.model
+
+    def pinned(self, model: str):
+        """A `generate` that always samples from adapter `model`, even after later updates (async rollouts)."""
+        return lambda prompt, **kwargs: self.generate(prompt, model=model, **kwargs)
+
+    def update(self, adapter_dir: str | Path, name: str, *, keep_loaded: int = 1, keep_files: int = 2) -> None:
+        """Serve `adapter_dir` as `name` from now on. The newest `keep_loaded` adapters stay loaded (2 while a
+        rollout pinned to the previous one may still be running); older ones are unloaded unless static. Only
+        the newest `keep_files` directories stay on disk (>= keep_loaded: vLLM may reload from CPU cache only)."""
         path = Path(adapter_dir).resolve()
         self._admin.post("load_lora_adapter", {"lora_name": name, "lora_path": str(path)})
         with self._lock:
             previous, self.model = self.model, name
         if previous != self._static:
-            self._admin.post("unload_lora_adapter", {"lora_name": previous})
+            self._loaded.append(previous)
+        while len(self._loaded) > keep_loaded - 1:
+            self._admin.post("unload_lora_adapter", {"lora_name": self._loaded.pop(0)})
         self._files.append(path)
-        while len(self._files) > keep_files:
+        while len(self._files) > max(keep_files, keep_loaded):
             shutil.rmtree(self._files.pop(0), ignore_errors=True)
 
 

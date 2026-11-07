@@ -40,7 +40,10 @@ the reader is up; `POLICY_URL`). It serves the SFT adapter as `sft`; after every
 trainer saves the adapter under `<output>/live/` and the server loads it at runtime, so rollouts are
 always on-policy. The loss uses its own detached log-probs as the old ones (one update per rollout
 batch), and `sampler_logprob_gap` in the step log tracks HF/vLLM agreement; stage 1 fails if it is
-large. Leave `POLICY_URL` empty to fall back to HF `generate` on the training GPU. Set `READER_URL` to the
+large. Leave `POLICY_URL` empty to fall back to HF `generate` on the training GPU.
+With `ASYNC_ROLLOUT=1` (`--async-rollout`) the rollouts of step t+1 are sampled, pinned to the adapter of
+step t-1, while step t trains; the loss then takes the sampler's log-probs as the old ones, so the clipped
+ratio corrects the one-step lag (`ratio`, `clip_frac`, `old_fallback_actions` in the step log). Set `READER_URL` to the
 reader instance's mapped public URL only when the reader is hosted on a separate Vast instance.
 The setup script creates a separate `READER_VENV` for vLLM because its dependency versions conflict
 with the stable Transformers/PEFT stack used by the GRPO trainer.

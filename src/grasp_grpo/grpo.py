@@ -48,7 +48,7 @@ def reference_logprobs(model, tokenizer, actions: list[dict]) -> list[list[float
     return batch_token_logprobs(model, rows, pad_token_id=tokenizer.pad_token_id)
 
 
-def grpo_backward(actor, reference, tokenizer, leaves: list[dict], *, clip_low: float, clip_high: float, kl_beta: float, max_batch_tokens: int = 12288) -> dict[str, float]:
+def grpo_backward(actor, reference, tokenizer, leaves: list[dict], *, clip_low: float, clip_high: float, kl_beta: float, max_batch_tokens: int = 12288, sampler_old: bool = False) -> dict[str, float]:
     """Backpropagate padded batches of actions (<= `max_batch_tokens` tokens each, so activation memory stays
     bounded); loss = sum over tokens / batch tokens.
 
@@ -69,7 +69,7 @@ def grpo_backward(actor, reference, tokenizer, leaves: list[dict], *, clip_low: 
         refs = reference_logprobs(reference, tokenizer, actions)
     set_train_mode(actor)
     try:
-        return _backward(actor, tokenizer, entries, refs, total_tokens, device, clip_low=clip_low, clip_high=clip_high, kl_beta=kl_beta, max_batch_tokens=max_batch_tokens)
+        return _backward(actor, tokenizer, entries, refs, total_tokens, device, clip_low=clip_low, clip_high=clip_high, kl_beta=kl_beta, max_batch_tokens=max_batch_tokens, sampler_old=sampler_old)
     finally:
         actor.eval()
 
@@ -83,13 +83,17 @@ def score_actions(actor, tokenizer, actions: list[dict], max_batch_tokens: int):
         yield idx, padded_logprobs_entropy(actor, [rows[i] for i in idx], pad_token_id=tokenizer.pad_token_id)
 
 
-def _backward(actor, tokenizer, entries, refs, total_tokens: int, device, *, clip_low: float, clip_high: float, kl_beta: float, max_batch_tokens: int = 12288) -> dict[str, float]:
-    """Old log-probs = the loss's own detached log-probs. Valid because every rollout batch gets exactly one
-    optimizer step, so the weights that sampled are the weights being scored (ratio 1, gradient = advantage x
-    grad log p, the same as recomputing them at sampling time). The sampler's log-probs, when the action has
-    them (vLLM), only feed `sampler_logprob_gap`: mean |HF - sampler| per token, a weight-sync check."""
+def _backward(actor, tokenizer, entries, refs, total_tokens: int, device, *, clip_low: float, clip_high: float, kl_beta: float, max_batch_tokens: int = 12288, sampler_old: bool = False) -> dict[str, float]:
+    """Synchronous (default): old log-probs = the loss's own detached log-probs. Valid because every rollout
+    batch gets exactly one optimizer step, so the weights that sampled are the weights being scored (ratio 1,
+    gradient = advantage x grad log p). The sampler's log-probs (vLLM) then only feed `sampler_logprob_gap`
+    (mean |HF - sampler| per token), a weight-sync check.
+
+    `sampler_old=True` (async rollouts, sampled one optimizer step earlier): old = the sampler's log-probs, so
+    the clipped ratio corrects the one-step lag. Actions without sampler log-probs (EOS appended client side)
+    fall back to ratio 1 and are counted in `old_fallback_actions`."""
     sums = {"loss": 0.0, "ratio": 0.0, "clipped": 0.0, "kl": 0.0, "entropy": 0.0}
-    gap_sum, gap_tokens = 0.0, 0
+    gap_sum, gap_tokens, fallback = 0.0, 0, 0
     for idx, scored in score_actions(actor, tokenizer, [action for action, _ in entries], max_batch_tokens):
         batch_loss = 0.0
         for i, (logp, entropy) in zip(idx, scored, strict=True):
@@ -98,8 +102,13 @@ def _backward(actor, tokenizer, entries, refs, total_tokens: int, device, *, cli
             old = logp.detach()
             sampler = action.get("old_token_logprobs") or []
             if len(sampler) == len(action["response_token_ids"]):
-                gap_sum += float((old - torch.tensor(sampler, device=device, dtype=old.dtype)).abs().sum())
+                sampled = torch.tensor(sampler, device=device, dtype=old.dtype)
+                gap_sum += float((old - sampled).abs().sum())
                 gap_tokens += len(sampler)
+                if sampler_old:
+                    old = sampled
+            elif sampler_old:
+                fallback += 1
             loss, stats = token_loss(logp, old, ref, torch.tensor(advantage, device=device, dtype=logp.dtype), clip_low=clip_low, clip_high=clip_high, kl_beta=kl_beta)
             batch_loss = batch_loss + loss
             sums["loss"] += float(loss.detach())
@@ -111,4 +120,6 @@ def _backward(actor, tokenizer, entries, refs, total_tokens: int, device, *, cli
     stats = {"loss": sums["loss"] / total_tokens, "ratio": sums["ratio"] / total_tokens, "clip_frac": sums["clipped"] / total_tokens, "kl": sums["kl"] / total_tokens, "entropy": sums["entropy"] / total_tokens, "tokens": float(total_tokens), "action_count": float(len(entries))}
     if gap_tokens:
         stats["sampler_logprob_gap"] = gap_sum / gap_tokens
+    if sampler_old:
+        stats["old_fallback_actions"] = float(fallback)
     return stats

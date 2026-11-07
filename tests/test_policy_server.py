@@ -120,3 +120,32 @@ def test_stage1_fails_when_server_samples_from_a_stale_adapter():
     assert gate_stage1([good] * 4, adapter_changed=True)[0]
     passed, reasons = gate_stage1([good, good, stale, stale], adapter_changed=True)
     assert not passed and "not sampling from the trained adapter" in reasons[0]
+
+
+def test_async_update_keeps_the_previous_adapter_loaded_for_pinned_rollouts(tmp_path):
+    policy, completions, admin = make([choice(0, [1, EOS], [-0.1, -0.1])])
+    dirs = [tmp_path / f"step-{i}" for i in range(4)]
+    for i, path in enumerate(dirs):
+        path.mkdir()
+        if i == 1:
+            pinned = policy.pinned(policy.current())  # a rollout started on policy-0
+        policy.update(path, f"policy-{i}", keep_loaded=2, keep_files=3)
+    unloaded = [payload["lora_name"] for endpoint, payload in admin.calls if endpoint == "unload_lora_adapter"]
+    assert unloaded == ["policy-0", "policy-1"]  # each one only after a newer adapter has replaced its successor
+    assert [p.exists() for p in dirs] == [False, True, True, True]
+    pinned("q", samples=1, max_new_tokens=4, temperature=0.0, top_p=1.0)
+    policy.generate("q", samples=1, max_new_tokens=4, temperature=0.0, top_p=1.0)
+    assert [r["model"] for r in completions.requests] == ["policy-0", "policy-3"]
+
+
+def test_async_backward_uses_sampler_logprobs_as_old(monkeypatch):
+    from grasp_grpo import grpo
+
+    actor = Linear()
+    monkeypatch.setattr(grpo, "score_actions", lambda model, tok, actions, budget: iter([([0, 1], [(model.w[:3], torch.zeros(3)), (model.w[:2], torch.zeros(2))])]))
+    lagged = {"prompt": "p", "response_token_ids": [1, 2, 3], "old_token_logprobs": [-0.6, -1.1, -2.1]}  # sampled a step earlier
+    no_sampler = {"prompt": "p", "response_token_ids": [1, 2], "old_token_logprobs": []}
+    stats = _backward(actor, None, [(lagged, 1.0), (no_sampler, 1.0)], [[-0.5, -1.0, -2.0], [-0.5, -1.0]], 5, "cpu", clip_low=0.2, clip_high=0.28, kl_beta=0.0, sampler_old=True)
+    expected = (3 * torch.exp(torch.tensor(0.1)).item() + 2) / 5  # ratio exp(0.1) on the lagged action, 1 on the fallback
+    assert stats["ratio"] == pytest.approx(expected, rel=1e-5)
+    assert stats["old_fallback_actions"] == 1.0
