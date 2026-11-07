@@ -85,6 +85,12 @@ def harness(monkeypatch, tmp_path):
     return SimpleNamespace(base=base, policies=policies, backward_calls=backward_calls, out=tmp_path)
 
 
+def strip_tag(name):
+    """policy-<run tag>-000001 -> policy-000001 (the tag is a per-run timestamp)."""
+    parts = name.split("-")
+    return name if len(parts) < 3 else f"{parts[0]}-{parts[-1]}"
+
+
 def metrics(out):
     return [json.loads(line) for line in (out / "metrics.jsonl").read_text().splitlines()]
 
@@ -96,7 +102,7 @@ def test_sync_loop_samples_each_step_from_the_latest_adapter(harness):
     seen: set = set()
     for event in events:
         if event[0] == "sample":
-            seen.add(event[1])
+            seen.add(strip_tag(event[1]))
         else:
             sampled_before.append(seen)
             seen = set()
@@ -110,9 +116,10 @@ def test_sync_loop_samples_each_step_from_the_latest_adapter(harness):
 def test_async_loop_samples_one_step_behind_and_trains_on_sampler_logprobs(harness):
     train.main([*harness.base, "--async-rollout"])
     policy = harness.policies[0]
-    samples = [e[1] for e in policy.events if e[0] == "sample"]
+    samples = [strip_tag(e[1]) for e in policy.events if e[0] == "sample"]
     updates = [e for e in policy.events if e[0] == "update"]
-    assert [u[1:] for u in updates] == [("policy-000001", 2), ("policy-000002", 2), ("policy-000003", 2)]
+    assert len({u[1].split("-")[1] for u in updates}) == 1  # one run tag for the whole run
+    assert [(strip_tag(u[1]), u[2]) for u in updates] == [("policy-000001", 2), ("policy-000002", 2), ("policy-000003", 2)]
     # step 1 and step 2 rollouts both start before any update lands; step 3 samples policy-000001.
     assert set(samples) == {"sft", "policy-000001"}
     assert harness.backward_calls == [True] * 3

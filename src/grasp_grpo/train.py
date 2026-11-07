@@ -143,6 +143,10 @@ def save_adapter(actor, tokenizer, path: Path, metadata: dict[str, Any]) -> Path
     return path
 
 
+
+def adapter_name(run_tag: str, step: int) -> str:
+    return f"policy-{run_tag}-{step:06d}"
+
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     torch.manual_seed(args.seed)
@@ -169,8 +173,11 @@ def main(argv: list[str] | None = None) -> None:
     policy, batcher = None, None
     if args.policy_url:
         policy = VLLMPolicy(args.policy_url, args.policy_api_key, tokenizer, model=args.policy_model)
+        # The server outlives a run (stage 1 -> 2 -> 3 share it) and keeps each run's last adapter loaded, so
+        # names carry a per-run tag: a bare "policy-000020" collided with stage 1's final adapter (2026-11-07).
+        run_tag = datetime.now(UTC).strftime("%m%d%H%M%S")
         if args.actor_checkpoint:  # the server starts from the SFT adapter; continue from this one instead
-            policy.update(save_adapter(actor, tokenizer, output / "live" / "step-000000", {"step": 0}), "policy-000000")
+            policy.update(save_adapter(actor, tokenizer, output / "live" / "step-000000", {"step": 0}), adapter_name(run_tag, 0))
         generate = policy.generate
     else:
         batcher = GenerationBatcher(lambda prompts, **kwargs: generate_batch(actor, tokenizer, prompts, **kwargs), max_batch=args.max_batch)
@@ -279,7 +286,7 @@ def main(argv: list[str] | None = None) -> None:
             info.update(lr=lr, updated=True, backward_seconds=time.monotonic() - backward_started)
             if policy is not None:  # the next rollouts must sample from the updated adapter
                 synced = time.monotonic()
-                policy.update(save_adapter(actor, tokenizer, output / "live" / f"step-{step:06d}", {"step": step}), f"policy-{step:06d}", keep_loaded=2 if args.async_rollout else 1, keep_files=3 if args.async_rollout else 2)
+                policy.update(save_adapter(actor, tokenizer, output / "live" / f"step-{step:06d}", {"step": step}), adapter_name(run_tag, step), keep_loaded=2 if args.async_rollout else 1, keep_files=3 if args.async_rollout else 2)
                 info["sync_seconds"] = time.monotonic() - synced
         else:
             info["updated"] = False
