@@ -29,7 +29,7 @@ ROWS = [([5, 6, 7, 8, 9], [10, 11, 12]), ([3, 4], [20]), ([1, 2, 3, 4, 5, 6, 7, 
 
 
 def test_batched_logprobs_equal_one_row_at_a_time(tiny):
-    batched = batch_token_logprobs(tiny, ROWS, pad_token_id=0, chunk=2)
+    batched = batch_token_logprobs(tiny, ROWS, pad_token_id=0, max_tokens=12)  # several padded batches
     for (prefix, response), got in zip(ROWS, batched, strict=True):
         if not response:
             assert got == []
@@ -68,3 +68,42 @@ def test_train_mode_keeps_dropout_off_with_checkpointing(tiny):
         tiny.eval()
         tiny.zero_grad(set_to_none=True)
         tiny.base_model.model.gradient_checkpointing_disable()
+
+
+def test_token_batches_respect_budget_and_cover_every_row():
+    from grasp_grpo.model import token_batches
+
+    lengths = [5, 50, 7, 30, 30, 200, 6]
+    batches = token_batches(lengths, max_tokens=64)
+    assert sorted(i for batch in batches for i in batch) == list(range(len(lengths)))
+    for batch in batches:
+        assert len(batch) == 1 or len(batch) * max(lengths[i] for i in batch) <= 64
+
+
+def test_batched_backward_matches_one_action_at_a_time(tiny):
+    from types import SimpleNamespace
+
+    from grasp_grpo import grpo
+
+    rows = [r for r in ROWS if r[1]]
+    actions = [{"prompt": str(i), "response_token_ids": response} for i, (_, response) in enumerate(rows)]
+    entries = [(action, adv) for action, adv in zip(actions, [1.0, -0.5, 0.7], strict=True)]
+    refs = batch_token_logprobs(tiny, rows, pad_token_id=0)
+    total = sum(len(r) for _, r in rows)
+    tok = SimpleNamespace(pad_token_id=0)
+    prompts = {str(i): prefix for i, (prefix, _) in enumerate(rows)}
+    original = grpo._prompt_ids
+    grpo._prompt_ids = lambda tokenizer, prompt: prompts[prompt]
+    try:
+        grads = []
+        for budget in (1, 10_000):  # one action per pass vs. all actions in one padded pass
+            tiny.zero_grad(set_to_none=True)
+            stats = grpo._backward(tiny, tok, entries, refs, total, "cpu", clip_low=0.2, clip_high=0.28, kl_beta=0.01, max_batch_tokens=budget)
+            grads.append({n: p.grad.clone() for n, p in tiny.named_parameters() if p.grad is not None})
+            assert stats["ratio"] == pytest.approx(1.0)
+    finally:
+        grpo._prompt_ids = original
+        tiny.zero_grad(set_to_none=True)
+    assert grads[0].keys() == grads[1].keys() and grads[0]
+    for name in grads[0]:
+        assert torch.allclose(grads[0][name], grads[1][name], atol=1e-5), name

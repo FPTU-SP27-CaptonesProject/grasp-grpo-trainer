@@ -36,34 +36,57 @@ def _token_logprobs_entropy(model, prefix: list[int], response_ids: list[int]):
     return selected, entropy
 
 
-def batch_token_logprobs(model, rows: list[tuple[list[int], list[int]]], *, pad_token_id: int, chunk: int = 8) -> list[list[float]]:
-    """log P(response token) for many (prefix, response) rows, `chunk` rows per left-padded forward.
-
-    Same quantity as `_token_logprobs_entropy` (no gradient), without one forward pass per row.
-    """
+def padded_logprobs_entropy(model, rows: list[tuple[list[int], list[int]]], *, pad_token_id: int, entropy: bool = True):
+    """Per-row float32 log P(response token) and entropy (None when `entropy=False`) from ONE left-padded
+    forward over all `rows` (every response non-empty). Differentiable unless called under no_grad; the
+    same quantities as `_token_logprobs_entropy` row by row."""
     import torch
     import torch.nn.functional as F
 
     device = next(model.parameters()).device
+    seqs = [prefix + response for prefix, response in rows]
+    width = max(len(seq) for seq in seqs)
+    input_ids = torch.tensor([[pad_token_id] * (width - len(seq)) + seq for seq in seqs], device=device)
+    attention = torch.tensor([[0] * (width - len(seq)) + [1] * len(seq) for seq in seqs], device=device, dtype=torch.long)
+    positions = (attention.cumsum(-1) - 1).clamp(min=0)
+    keep = max(len(response) for _, response in rows) + 1
+    logits = model(input_ids=input_ids, attention_mask=attention, position_ids=positions, use_cache=False, logits_to_keep=keep).logits
+    out = []
+    for j, (_, response) in enumerate(rows):
+        window = F.log_softmax(logits[j, keep - 1 - len(response) : keep - 1].float(), dim=-1)
+        targets = torch.tensor(response, device=device, dtype=torch.long)
+        selected = window.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
+        out.append((selected, -(window.exp() * window).sum(-1) if entropy else None))
+    return out
+
+
+def token_batches(lengths: list[int], max_tokens: int) -> list[list[int]]:
+    """Row indices grouped shortest first so each padded batch (rows x longest row) holds at most
+    `max_tokens` tokens; a row longer than the budget gets a batch of its own."""
+    batches: list[list[int]] = []
+    current: list[int] = []
+    for i in sorted(range(len(lengths)), key=lambda i: lengths[i]):
+        if current and (len(current) + 1) * lengths[i] > max_tokens:
+            batches.append(current)
+            current = []
+        current.append(i)
+    if current:
+        batches.append(current)
+    return batches
+
+
+def batch_token_logprobs(model, rows: list[tuple[list[int], list[int]]], *, pad_token_id: int, max_tokens: int = 24576) -> list[list[float]]:
+    """log P(response token) for many (prefix, response) rows, in padded batches of <= `max_tokens` tokens (no gradient)."""
+    import torch
+
     out: list[list[float]] = [[] for _ in rows]
-    order = sorted(range(len(rows)), key=lambda i: len(rows[i][0]) + len(rows[i][1]))
+    live = [i for i, (_, response) in enumerate(rows) if response]
     with torch.no_grad():
-        for start in range(0, len(order), chunk):
-            idx = [i for i in order[start : start + chunk] if rows[i][1]]
-            if not idx:
-                continue
-            seqs = [rows[i][0] + rows[i][1] for i in idx]
-            width = max(len(seq) for seq in seqs)
-            input_ids = torch.tensor([[pad_token_id] * (width - len(seq)) + seq for seq in seqs], device=device)
-            attention = torch.tensor([[0] * (width - len(seq)) + [1] * len(seq) for seq in seqs], device=device, dtype=torch.long)
-            positions = (attention.cumsum(-1) - 1).clamp(min=0)
-            keep = max(len(rows[i][1]) for i in idx) + 1
-            logits = model(input_ids=input_ids, attention_mask=attention, position_ids=positions, use_cache=False, logits_to_keep=keep).logits
-            for j, i in enumerate(idx):
-                response = rows[i][1]
-                window = F.log_softmax(logits[j, keep - 1 - len(response) : keep - 1].float(), dim=-1)
-                targets = torch.tensor(response, device=device, dtype=torch.long)
-                out[i] = window.gather(-1, targets.unsqueeze(-1)).squeeze(-1).cpu().tolist()
+        for batch in token_batches([len(rows[i][0]) + len(rows[i][1]) for i in live], max_tokens):
+            idx = [live[k] for k in batch]
+            scored = padded_logprobs_entropy(model, [rows[i] for i in idx], pad_token_id=pad_token_id, entropy=False)
+            for i, (selected, _) in zip(idx, scored, strict=True):
+                out[i] = selected.cpu().tolist()
     return out
 
 

@@ -9,7 +9,7 @@ import json
 import math
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -56,6 +56,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--clip-low", type=float, default=0.2)
     p.add_argument("--clip-high", type=float, default=0.28)
     p.add_argument("--kl-beta", type=float, default=0.002)
+    p.add_argument("--backward-batch-tokens", type=int, default=12288, help="Padded tokens per backward pass (rows x longest row); lower it on out-of-memory")
+    p.add_argument("--rollout-oversample", type=float, default=1.6, help="Questions started at once per step = questions-per-iteration x this, so zero-signal trees rarely need a second wave")
     # tree and reward
     p.add_argument("--branch-factor", type=int, default=2)
     p.add_argument("--max-steps", type=int, default=5)
@@ -178,9 +180,7 @@ def main(argv: list[str] | None = None) -> None:
     def make_env(example: dict[str, Any], step: int) -> BinaryTreeEnvironment:
         return BinaryTreeEnvironment(actor, tokenizer, reader, BoundRetriever(retriever, example, lock), branch_factor=2, max_steps=args.max_steps, max_leaves=args.max_leaves, temperature=args.temperature, top_p=args.top_p, alpha=args.alpha, retrieval_cost=args.retrieval_cost, behavior_checkpoint=f"in_memory_actor_before_step_{step}", initial_retrieval=not args.no_initial_retrieval, rd_gain_weight=args.rd_gain_weight, qf_gain_weight=args.qf_gain_weight, ki_hit_weight=args.ki_hit_weight, ki_miss_penalty=args.ki_miss_penalty, shaping_scale=args.shaping_scale, advantage_std_norm=args.advantage_std_norm, generate_fn=sample_fn)
 
-    def rollout(batch: list[dict[str, Any]], step: int) -> list[dict[str, Any]]:
-        with ThreadPoolExecutor(max_workers=args.workers) as pool:
-            return list(pool.map(lambda example: make_env(example, step).run(example), batch))
+    pool = ThreadPoolExecutor(max_workers=args.workers)
 
     eval_history: list[dict[str, Any]] = []
 
@@ -208,34 +208,51 @@ def main(argv: list[str] | None = None) -> None:
         actor.eval()  # rollouts and ratios use the same dropout-free policy
         collected: list[dict[str, Any]] = []
         zero_trees: list[dict[str, Any]] = []
-        direct, attempts = 0, 0
+        direct, attempts, extra_trees = 0, 0, 0
         rollout_started = time.monotonic()
-        while len(collected) < args.questions_per_iteration and attempts < max_attempts:
-            need = min(args.questions_per_iteration - len(collected), max_attempts - attempts)
-            batch = [examples[(cursor + offset) % len(examples)] for offset in range(need)]
-            cursor += need
-            attempts += need
-            for tree in rollout(batch, step):
+        # Streamed dynamic sampling: start questions x oversample trees at once; whenever one finishes without
+        # signal, start a replacement right away while fewer than questions-per-iteration are usable or pending.
+        pending: set = set()
+        want = math.ceil(args.questions_per_iteration * max(1.0, args.rollout_oversample))
+        while True:
+            for _ in range(max(0, min(want, max_attempts - attempts))):
+                example = examples[cursor % len(examples)]
+                pending.add(pool.submit(make_env(example, step).run, example))
+                cursor += 1
+                attempts += 1
+            if not pending:
+                break
+            done, pending = wait(pending, return_when=FIRST_COMPLETED)
+            for future in done:
+                tree = future.result()
                 if not any(leaf["actions"] for leaf in tree["leaves"]):
                     direct += 1  # reader answered directly: no proxy tokens to train
                 elif tree["zero_signal"]:
                     zero_trees.append(tree)  # all leaves tie: zero advantage, dropped (DAPO dynamic sampling)
-                else:
+                elif len(collected) < args.questions_per_iteration:
                     collected.append(tree)
+                else:
+                    extra_trees += 1  # usable but over the batch size: same batch size every step
+            if len(collected) >= args.questions_per_iteration:  # full: drop queued trees, let running ones finish
+                cancelled = {future for future in pending if future.cancel()}
+                pending -= cancelled
+                attempts -= len(cancelled)
+            want = args.questions_per_iteration - len(collected) - len(pending)
         rollout_seconds = time.monotonic() - rollout_started
         signal_trees = len(collected) + len(zero_trees)
         zero_fraction = len(zero_trees) / signal_trees if signal_trees else 1.0
-        info: dict[str, Any] = {"step": step, **tree_stats(collected + zero_trees), "zero_signal_groups": len(zero_trees), "zero_signal_fraction": zero_fraction, "direct_answer_trees": direct, "refilled_questions": max(0, attempts - args.questions_per_iteration), "seconds_per_question": rollout_seconds / attempts}
+        info: dict[str, Any] = {"step": step, **tree_stats(collected + zero_trees), "zero_signal_groups": len(zero_trees), "zero_signal_fraction": zero_fraction, "direct_answer_trees": direct, "refilled_questions": max(0, attempts - args.questions_per_iteration), "extra_trees": extra_trees, "rollout_seconds": rollout_seconds, "seconds_per_question": rollout_seconds / attempts}
         if collected:
             lr = lr_at(step, args.learning_rate, args.warmup_steps)
             for group in optimizer.param_groups:
                 group["lr"] = lr
             optimizer.zero_grad(set_to_none=True)
             leaves = [leaf for tree in collected for leaf in tree["leaves"]]
-            info.update(grpo_backward(actor, None, tokenizer, leaves, clip_low=args.clip_low, clip_high=args.clip_high, kl_beta=args.kl_beta))
+            backward_started = time.monotonic()
+            info.update(grpo_backward(actor, None, tokenizer, leaves, clip_low=args.clip_low, clip_high=args.clip_high, kl_beta=args.kl_beta, max_batch_tokens=args.backward_batch_tokens))
             info["grad_norm"] = float(torch.nn.utils.clip_grad_norm_(params, 1.0))
             optimizer.step()
-            info.update(lr=lr, updated=True)
+            info.update(lr=lr, updated=True, backward_seconds=time.monotonic() - backward_started)
             if policy is not None:  # the next rollouts must sample from the updated adapter
                 synced = time.monotonic()
                 policy.update(save_adapter(actor, tokenizer, output / "live" / f"step-{step:06d}", {"step": step}), f"policy-{step:06d}")
@@ -268,6 +285,7 @@ def main(argv: list[str] | None = None) -> None:
             tqdm.write(json.dumps({"early_stop": reason, "step": step}))
             break
     progress.close()
+    pool.shutdown()
     final = output / f"checkpoint-grpo-step-{step:06d}"
     if not final.exists():
         save_adapter(actor, tokenizer, final, {"step": step, "sft_checkpoint": str(Path(args.sft_checkpoint).resolve()), "config": config, "metrics": metrics[-50:]})

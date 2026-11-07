@@ -106,7 +106,7 @@ def test_backward_uses_own_logprobs_as_old_and_reports_sampler_gap(monkeypatch):
     from grasp_grpo import grpo
 
     actor = Linear()
-    monkeypatch.setattr(grpo, "response_logprob_entropy", lambda model, tok, prompt, ids: (model.w[: len(ids)], torch.zeros(len(ids))))
+    monkeypatch.setattr(grpo, "score_actions", lambda model, tok, actions, budget: iter([([0], [(model.w[:3], torch.zeros(3))])]))
     action = {"prompt": "p", "response_token_ids": [1, 2, 3], "old_token_logprobs": [-0.4, -1.0, -2.2]}
     stats = _backward(actor, None, [(action, 1.5)], [[-0.5, -1.0, -2.0]], 3, "cpu", clip_low=0.2, clip_high=0.28, kl_beta=0.0)
     assert stats["ratio"] == pytest.approx(1.0)
