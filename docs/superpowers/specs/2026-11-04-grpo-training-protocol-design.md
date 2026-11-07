@@ -105,7 +105,7 @@ trước khi tốn giờ GPU cho run dài.
 |---|---|---|---|---|
 | **0. Mốc SFT** | `grasp-eval-policy` với adapter SFT, 300 câu eval, chạy 2 lần (`--reader-protocol grasp` và `legacy`). Đo thêm giây/câu và tỷ lệ nhóm reward giống hệt nhau khi sample G = 4 | 1–2 giờ | F1 bản `grasp` ≥ 0,30 (cao hơn rõ mức ~0,2 của run cũ), nhóm cùng reward ≤ 50%, giây/câu ≤ 20 | Sửa môi trường hoặc tốc độ; chưa train |
 | **1. Smoke** | 20 bước, 4 câu/bước | ~30 phút | Không NaN; ratio trung bình trong [0,9; 1,1]; KL > 0 và < 0,05; grad norm > 0; trọng số LoRA thay đổi (so `adapter_model.safetensors` trước/sau) | Sửa lỗi code |
-| **2. Overfit** | 40 bước, lặp trên 8 câu cố định, 8 câu/bước | ~1 giờ | Reward trung bình 10 bước cuối cao hơn 10 bước đầu ≥ 30% trên chính 8 câu đó | Lỗi ở advantage, loss hoặc lr: dừng, debug |
+| **2. Overfit** | 40 bước, lặp trên 8 câu cố định, 8 câu/bước | ~1 giờ | Reward trung bình 10 bước cuối thu hẹp ≥ 30% khoảng cách từ reward 10 bước đầu tới 1,0 trên chính 8 câu đó (sửa 2026-11-08: SFT đã đạt 0,84 nên "+30%" vượt trần 1,0) | Lỗi ở advantage, loss hoặc lr: dừng, debug |
 | **3. Pilot** | 300 bước, cấu hình mục 3.4 | 15–20 giờ | Có ít nhất một lần eval F1 ≥ mốc SFT + 0,02, và không luật dừng nào kích hoạt | Giữ báo cáo, quyết định lại cấu hình |
 | **4. Full** | Chạy tiếp từ `best/` của pilot (`--actor-checkpoint`), reference vẫn là SFT | Theo `MAX_HOURS` | Early stopping quyết định | — |
 

@@ -28,6 +28,9 @@ def test_stage2():
     assert gate_stage2(rising)[0]
     assert not gate_stage2([step(mean_reward=0.5)] * 40)[0]
     assert not gate_stage2([step()] * 5)[0]
+    near_ceiling = [step(mean_reward=0.836)] * 10 + [step(mean_reward=0.86)] * 20
+    assert gate_stage2([*near_ceiling, *[step(mean_reward=0.89)] * 10])[0]  # 30% of the 0.164 gap -> 0.885
+    assert not gate_stage2([*near_ceiling, *[step(mean_reward=0.855)] * 10])[0]
 
 
 def test_stage3():

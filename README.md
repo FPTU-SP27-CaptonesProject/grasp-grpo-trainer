@@ -225,7 +225,7 @@ Every GPU hour is gated; see `docs/superpowers/specs/2026-11-04-grpo-training-pr
 |---|---|---|
 | 0 | `scripts/stage0_baseline.sh` | SFT F1 ≥ 0.30 with the Project A reader, ≤ 50% zero-signal trees, ≤ 20 s per tree |
 | 1 | `scripts/stage1_smoke.sh` | finite loss, ratio ≈ 1, 0 < KL < 0.05, non-zero gradients, LoRA weights moved |
-| 2 | `scripts/stage2_overfit.sh` | reward on 8 fixed questions rises ≥ 30% in 40 steps |
+| 2 | `scripts/stage2_overfit.sh` | reward on 8 fixed questions closes ≥ 30% of its gap to 1.0 in 40 steps |
 | 3 | `scripts/stage3_pilot.sh` | eval F1 ≥ SFT + 0.02 and no early-stop rule fired |
 | 4 | `scripts/train_grpo_vast.sh` | early stopping decides; use `best/` |
 

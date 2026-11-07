@@ -53,12 +53,16 @@ def gate_stage1(metrics: list[dict[str, Any]], *, adapter_changed: bool, ratio_r
     return not reasons, reasons
 
 
-def gate_stage2(metrics: list[dict[str, Any]], *, window: int = 10, min_gain: float = 0.30) -> tuple[bool, list[str]]:
+def gate_stage2(metrics: list[dict[str, Any]], *, window: int = 10, min_gain: float = 0.30, max_reward: float = 1.0) -> tuple[bool, list[str]]:
+    """The last `window` steps must close `min_gain` of the gap between the first `window` and `max_reward`.
+
+    Relative to the gap, not to the start: the SFT policy already scored 0.84 on the 8 overfit questions
+    (2026-11-07), and "+30% of 0.84" = 1.09 is above the reward ceiling (F1 and recall are <= 1)."""
     rewards = [m["mean_reward"] for m in metrics if m.get("mean_reward") is not None]
     if len(rewards) < 2 * window:
         return False, [f"need {2 * window} steps with rewards, got {len(rewards)}"]
     first, last = _mean(rewards[:window]), _mean(rewards[-window:])
-    target = first * (1 + min_gain) if first > 0 else first + 0.05
+    target = first + min_gain * max(max_reward - first, 0.0)
     if last < target:
         return False, [f"reward {first:.3f} -> {last:.3f}, needed >= {target:.3f}: the pipeline cannot fit 8 questions"]
     return True, []
