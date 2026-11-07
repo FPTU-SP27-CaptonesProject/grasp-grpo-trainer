@@ -82,6 +82,15 @@ def evaluate_policy(generate_fn, reader, retriever, examples: list[dict[str, Any
     return summarize(examples, predictions, time.monotonic() - started)
 
 
+def interleave_datasets(examples: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Round-robin over datasets (order of first appearance), keeping each dataset's own order."""
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for example in examples:
+        groups.setdefault(str(example.get("dataset") or str(example["id"]).split("::", 1)[0]), []).append(example)
+    queues = list(groups.values())
+    return [queue[i] for i in range(max(map(len, queues), default=0)) for queue in queues if i < len(queue)]
+
+
 def signal_probe(make_env, examples: list[dict[str, Any]], *, workers: int) -> dict[str, Any]:
     """Share of sampled trees whose leaves all score the same (zero advantage, no gradient)."""
     started = time.monotonic()
@@ -114,7 +123,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--load-in-4bit", action="store_true", help="nf4 base (slower generation, less memory); default bf16")
     parser.add_argument("--output", required=True)
     args = parser.parse_args(argv)
-    examples = load_eval_examples(args.qa, args.eval_ids)
+    # The eval set is grouped by dataset; interleave so --limit and the signal probe see every dataset.
+    examples = interleave_datasets(load_eval_examples(args.qa, args.eval_ids))
     if args.limit is not None:
         examples = examples[: args.limit]
     retriever = retriever_from_args(args)

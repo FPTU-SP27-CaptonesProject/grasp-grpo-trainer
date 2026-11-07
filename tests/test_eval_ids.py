@@ -29,3 +29,11 @@ def test_filter_examples_keeps_order_and_reports_missing():
     assert [e["id"] for e in filter_examples(examples, ["z", "x"])] == ["x", "z"]
     with pytest.raises(ValueError, match="missing"):
         filter_examples(examples, ["x", "nope"])
+
+
+def test_interleave_datasets_round_robins_and_keeps_every_example():
+    from grasp_grpo.policy_eval import interleave_datasets
+
+    rows = [{"id": f"a::{i}"} for i in range(3)] + [{"id": "b::0", "dataset": "b"}] + [{"id": f"c::{i}"} for i in range(2)]
+    assert [r["id"] for r in interleave_datasets(rows)] == ["a::0", "b::0", "c::0", "a::1", "c::1", "a::2"]
+    assert interleave_datasets([]) == []
