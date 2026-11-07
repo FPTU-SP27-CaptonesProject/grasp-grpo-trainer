@@ -18,7 +18,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-rollout = ["faiss-cpu>=1.9", "openai>=1.68", "sentence-transformers>=3.4"]
+rollout = ["faiss-cpu>=1.9", "httpx>=0.27", "openai>=1.68", "sentence-transformers>=3.4"]
 quantization = ["bitsandbytes>=0.45"]
 dev = ["pytest>=8.3", "ruff>=0.11"]
 
