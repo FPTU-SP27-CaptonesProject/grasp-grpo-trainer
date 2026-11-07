@@ -178,7 +178,8 @@ function renderRun(run) {
     charts.append(card("c-zero", "Tỷ lệ nhóm không tín hiệu", "Mọi nhánh cùng reward → không học được"));
     charts.append(card("c-format", "Tỷ lệ đúng định dạng theo vai", "Trung bình 10 bước"));
     charts.append(card("c-grad", "Grad norm"));
-    charts.append(card("c-speed", "Giây mỗi câu (rollout)"));
+    charts.append(card("c-speed", "Thời gian mỗi bước", "Cột: rollout · backward · đổi adapter vLLM (khi log có) · đường: tổng bước tính từ đồng hồ"));
+    if (m.some(r => r.sampler_logprob_gap != null)) charts.append(card("c-gap", "Độ lệch logprob vLLM ↔ trainer", "Trung bình |Δ| mỗi token. Gần 0 = vLLM sinh bằng đúng adapter vừa train; stage 1 fail nếu > 0.5"));
   }
   if (run.gpu.length) charts.append(card("c-gpu", "VRAM đang dùng", "Mẫu mỗi 30 giây · GPU 0 reader, GPU 1 train"));
 
@@ -201,7 +202,12 @@ function renderRun(run) {
     plot("c-zero", [line(x, col("zero_signal_fraction"), "từng bước", c1, {line: {color: c1, width: 1}, opacity: 0.35}), line(x, rolling(col("zero_signal_fraction")), "TB 10 bước", c1)], layout("tỷ lệ"));
     plot("c-format", [line(x, rolling(col("format_rate_rd")), "RD", c1), line(x, rolling(col("format_rate_qf")), "QF", c2), line(x, rolling(col("format_rate_ki")), "KI", c3)], layout("tỷ lệ"));
     plot("c-grad", [line(x, col("grad_norm"), "grad norm", c1)], layout("L2 (trước clip 1.0)", {showlegend: false}));
-    plot("c-speed", [line(x, col("seconds_per_question"), "s/câu", c1)], layout("giây", {showlegend: false}));
+    const wall = m.map((r, i) => r.elapsed_hours == null ? null : (r.elapsed_hours - (i ? m[i - 1].elapsed_hours ?? 0 : 0)) * 3600);
+    const surf = css("--surface-1");
+    const bar = (k, name, color) => ({x, y: col(k), name, type: "bar", marker: {color, line: {color: surf, width: 2}}, hovertemplate: `%{y:.0f} s<extra>${name}</extra>`});
+    const parts = m.some(r => r.rollout_seconds != null) ? [bar("rollout_seconds", "rollout", c1), bar("backward_seconds", "backward", c2), bar("sync_seconds", "đổi adapter", c3)] : [];
+    plot("c-speed", [...parts, line(x, wall, "tổng bước", mut, {line: {color: mut, width: 2}, hovertemplate: `%{y:.0f} s<extra>tổng bước</extra>`})], layout("giây", {barmode: "stack", bargap: 0.25}));
+    if (m.some(r => r.sampler_logprob_gap != null)) plot("c-gap", [line(x, col("sampler_logprob_gap"), "|Δ logprob|", c1, {mode: "lines+markers", marker: {size: 8, color: c1, line: {color: surf, width: 2}}})], layout("nats/token", {showlegend: false, yaxis: {title: {text: "nats/token"}, rangemode: "tozero", gridcolor: css("--grid"), linecolor: css("--axis"), zeroline: false}}));
   }
   if (run.gpu.length) {
     const gpus = [...new Set(run.gpu.map(g => g.gpu))].sort();
