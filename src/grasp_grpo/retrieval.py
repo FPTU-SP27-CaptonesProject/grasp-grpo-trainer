@@ -1,6 +1,8 @@
 """E5/FAISS retrieval compatible with Project A passage and triple stores."""
 from __future__ import annotations
 
+import functools
+
 import json
 import sqlite3
 import threading
@@ -15,11 +17,16 @@ def _triple_key(head: str, relation: str, tail: str) -> str:
 
 
 @cache
-def _load_encoder(name: str):
-    """One E5 model shared by every corpus (Project A E5Encoder: max_seq_length 512, fp16 on GPU)."""
+@functools.lru_cache(maxsize=None)
+def _load_encoder(name: str, device: str | None = None):
+    """One E5 model shared by every corpus (Project A E5Encoder: max_seq_length 512, fp16 on GPU).
+
+    Cached so the three corpora share a copy (each loaded its own before: ~2 GB). `device` lets the trainer
+    put it on the vLLM GPU: on the training GPU, the 100-passage re-score of every search queued behind the
+    backward pass and async rollouts ran ~240 s instead of ~140 s (stage 2, 2026-11-09)."""
     from sentence_transformers import SentenceTransformer
 
-    model = SentenceTransformer(name)
+    model = SentenceTransformer(name, device=device)
     model.max_seq_length = 512
     if model.device.type == "cuda":
         model.half()
@@ -35,7 +42,7 @@ class DenseRetriever:
     than the ones the SFT data and the SFT eval were produced with.
     """
 
-    def __init__(self, index_dir: str, encoder: str, *, top_k: int, max_candidate_triples: int, triple_cache: str | None = None, query_prefix: str = "query: ", passage_prefix: str = "passage: ", candidates: int = 100, nprobe: int = 64, rescore: bool = True):
+    def __init__(self, index_dir: str, encoder: str, *, top_k: int, max_candidate_triples: int, triple_cache: str | None = None, query_prefix: str = "query: ", passage_prefix: str = "passage: ", candidates: int = 100, nprobe: int = 64, rescore: bool = True, encoder_device: str | None = None):
         import faiss
 
         root = Path(index_dir).resolve()
@@ -47,7 +54,7 @@ class DenseRetriever:
         passage_path = next((x for x in stores if x.is_file()), None)
         if passage_path is None:
             raise FileNotFoundError("passages.sqlite is required for Project A-compatible retrieval")
-        self._setup(faiss.read_index(str(index_path)), _load_encoder(encoder), passage_path, top_k=top_k, max_candidate_triples=max_candidate_triples, triple_cache=triple_cache, query_prefix=query_prefix, passage_prefix=passage_prefix, candidates=candidates, nprobe=nprobe, rescore=rescore)
+        self._setup(faiss.read_index(str(index_path)), _load_encoder(encoder, encoder_device), passage_path, top_k=top_k, max_candidate_triples=max_candidate_triples, triple_cache=triple_cache, query_prefix=query_prefix, passage_prefix=passage_prefix, candidates=candidates, nprobe=nprobe, rescore=rescore)
         self.index_path = index_path
 
     @classmethod
@@ -181,13 +188,13 @@ class DenseRetriever:
 class CorpusRouter:
     """Routes each mixed-dataset example to its own frozen corpus artifacts."""
 
-    def __init__(self, config_path: str, encoder: str, *, top_k: int, max_candidate_triples: int, candidates: int = 100, nprobe: int = 64, rescore: bool = True):
+    def __init__(self, config_path: str, encoder: str, *, top_k: int, max_candidate_triples: int, candidates: int = 100, nprobe: int = 64, rescore: bool = True, encoder_device: str | None = None):
         config = json.loads(Path(config_path).read_text(encoding="utf-8"))
         entries = config.get("corpora", config)
         if not isinstance(entries, dict) or not entries:
             raise ValueError("corpus config must be a non-empty object or contain a corpora object")
         self.retrievers = {
-            str(name): DenseRetriever(str(item["index_dir"]), encoder, top_k=top_k, max_candidate_triples=max_candidate_triples, triple_cache=item.get("triple_cache"), query_prefix=item.get("query_prefix", "query: "), passage_prefix=item.get("passage_prefix", "passage: "), candidates=candidates, nprobe=nprobe, rescore=rescore)
+            str(name): DenseRetriever(str(item["index_dir"]), encoder, top_k=top_k, max_candidate_triples=max_candidate_triples, triple_cache=item.get("triple_cache"), query_prefix=item.get("query_prefix", "query: "), passage_prefix=item.get("passage_prefix", "passage: "), candidates=candidates, nprobe=nprobe, rescore=rescore, encoder_device=encoder_device)
             for name, item in entries.items()
         }
         self.current: DenseRetriever | None = None
@@ -257,6 +264,7 @@ def add_retrieval_arguments(parser) -> None:
     parser.add_argument("--corpus-config", help="JSON mapping metadata.dataset to index/triple artifacts")
     parser.add_argument("--triple-cache")
     parser.add_argument("--encoder", default="intfloat/e5-large-v2")
+    parser.add_argument("--encoder-device", help="torch device for the E5 encoder (default: cuda:0 / cpu); scripts set RETRIEVER_GPU")
     parser.add_argument("--top-k", type=int, default=10)
     parser.add_argument("--max-candidate-triples", type=int, default=20)
     # Project A configs/retriever/e5_large.yaml
@@ -271,7 +279,7 @@ def add_retrieval_arguments(parser) -> None:
 def retriever_from_args(args) -> DenseRetriever | CorpusRouter:
     if bool(args.index_dir) == bool(args.corpus_config):
         raise ValueError("provide exactly one of --index-dir or --corpus-config")
-    extra = {"candidates": getattr(args, "retrieval_candidates", 100), "nprobe": getattr(args, "nprobe", 64), "rescore": not getattr(args, "no_rescore", False)}
+    extra = {"candidates": getattr(args, "retrieval_candidates", 100), "nprobe": getattr(args, "nprobe", 64), "rescore": not getattr(args, "no_rescore", False), "encoder_device": getattr(args, "encoder_device", None)}
     if args.corpus_config:
         retriever = CorpusRouter(args.corpus_config, args.encoder, top_k=args.top_k, max_candidate_triples=args.max_candidate_triples, **extra)
     else:

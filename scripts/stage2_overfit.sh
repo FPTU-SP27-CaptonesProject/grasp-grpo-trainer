@@ -11,6 +11,6 @@ fi
 start_logging "$RUN"
 head -n 8 "$QA_FILE" > "$RUN/overfit8.jsonl"
 train_args
-CUDA_VISIBLE_DEVICES="$TRAIN_GPU" grasp-train-grpo "${TRAIN_ARGS[@]}" \
+CUDA_VISIBLE_DEVICES="$TRAIN_DEVICES" grasp-train-grpo "${TRAIN_ARGS[@]}" \
   --qa "$RUN/overfit8.jsonl" --output-dir "$RUN" --iterations 40 --questions-per-iteration 8 --save-every 40
 grasp-stage-gate --stage 2 --run-dir "$RUN"

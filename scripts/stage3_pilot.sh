@@ -9,7 +9,7 @@ start_logging "$RUN"
 train_args
 sft=()
 [[ -n "${SFT_F1:-}" ]] && sft=(--sft-f1 "$SFT_F1")
-CUDA_VISIBLE_DEVICES="$TRAIN_GPU" grasp-train-grpo "${TRAIN_ARGS[@]}" \
+CUDA_VISIBLE_DEVICES="$TRAIN_DEVICES" grasp-train-grpo "${TRAIN_ARGS[@]}" \
   --qa "$QA_FILE" --output-dir "$RUN" --iterations "$ITERATIONS" --questions-per-iteration "$QUESTIONS_PER_ITERATION" \
   --eval-qa "$EVAL_QA" --eval-ids "$EVAL_IDS" --eval-every "$EVAL_EVERY" "${sft[@]}" \
   --max-hours "$MAX_HOURS" --save-every "$SAVE_EVERY"

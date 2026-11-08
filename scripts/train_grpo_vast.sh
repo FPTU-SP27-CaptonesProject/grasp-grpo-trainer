@@ -9,7 +9,7 @@ train_args
 extra=()
 [[ -n "${ACTOR_CHECKPOINT:-}" ]] && extra+=(--actor-checkpoint "$ACTOR_CHECKPOINT")
 [[ -n "${SFT_F1:-}" ]] && extra+=(--sft-f1 "$SFT_F1")
-CUDA_VISIBLE_DEVICES="$TRAIN_GPU" grasp-train-grpo "${TRAIN_ARGS[@]}" "${extra[@]}" \
+CUDA_VISIBLE_DEVICES="$TRAIN_DEVICES" grasp-train-grpo "${TRAIN_ARGS[@]}" "${extra[@]}" \
   --qa "$QA_FILE" --output-dir "$OUTPUT_DIR" --iterations "$ITERATIONS" --questions-per-iteration "$QUESTIONS_PER_ITERATION" \
   --eval-qa "$EVAL_QA" --eval-ids "$EVAL_IDS" --eval-every "$EVAL_EVERY" \
   --max-hours "$MAX_HOURS" --save-every "$SAVE_EVERY"

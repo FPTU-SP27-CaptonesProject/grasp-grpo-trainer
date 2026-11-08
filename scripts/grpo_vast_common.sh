@@ -122,5 +122,11 @@ train_args() {
     --clip-low "$CLIP_LOW" --clip-high "$CLIP_HIGH" --kl-beta "$KL_BETA")
   # 1 = sample step t+1 on the vLLM server while step t trains (one step off-policy); needs POLICY_URL.
   if [[ "${ASYNC_ROLLOUT:-0}" == "1" ]]; then TRAIN_ARGS+=(--async-rollout); fi
+  # The trainer sees TRAIN_GPU as cuda:0; RETRIEVER_GPU (the vLLM GPU, ~2 GB free) becomes cuda:1 for E5.
+  TRAIN_DEVICES="$TRAIN_GPU"
+  if [[ -n "${RETRIEVER_GPU:-}" && "$RETRIEVER_GPU" != "$TRAIN_GPU" ]]; then
+    TRAIN_DEVICES="$TRAIN_GPU,$RETRIEVER_GPU"
+    TRAIN_ARGS+=(--encoder-device cuda:1)
+  fi
   return 0
 }
