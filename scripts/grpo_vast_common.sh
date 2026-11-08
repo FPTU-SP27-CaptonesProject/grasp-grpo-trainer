@@ -19,6 +19,9 @@ export PYTHONUNBUFFERED=1
 # Model downloads (vLLM reader, base model, E5) and temp files stay off the small container root disk.
 export HF_HOME="${HF_HOME:-/workspace/.cache/huggingface}" TMPDIR="${TMPDIR:-/workspace/tmp}"   VLLM_CACHE_ROOT="${VLLM_CACHE_ROOT:-/workspace/.cache/vllm}" XDG_CACHE_HOME="${XDG_CACHE_HOME:-/workspace/.cache}"
 export HF_XET_HIGH_PERFORMANCE=1 HF_XET_CHUNK_CACHE_SIZE_BYTES=0
+# OpenBLAS starts one thread per core; on many-core hosts that plus the rollout threads exceeds its
+# buffer table ("too many memory regions", then a segfault; 2026-11-09). Torch/FAISS CPU work is small here.
+export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-8}" OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}" MKL_NUM_THREADS="${MKL_NUM_THREADS:-8}"
 mkdir -p "$HF_HOME" "$TMPDIR"
 export PYTHONPATH="$PROJECT_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
 
