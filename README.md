@@ -57,7 +57,7 @@ retrieved documents are missing from it; with `EXTRACT_TRIPLES=1` (`--extract-tr
 extracted on first retrieval with Project A's extractor (same prompt, Qwen3-235B on Bedrock,
 `BEDROCK_API_KEY`) and written back to the cache, capped per process by `EXTRACT_BUDGET_USD`.
 `grasp-eval-policy` reports `triple_coverage` (`cache_misses` = before extraction) and
-`triple_extraction` (documents, tokens, USD). Upload the grown cache back to the Hub before the
+`triple_extraction` (documents, tokens, USD). To avoid waiting on Bedrock during a run, `bash scripts/prefetch_triples_vast.sh` extracts the top 20 documents of every training and eval question beforehand (`PREFETCH_DRY_RUN=1` estimates the cost first; reruns resume). Upload the grown cache back to the Hub before the
 instance is destroyed so later runs start from it. `scripts/build_triple_caches_vast.sh` (triples from teacher
 trajectories only) is kept for the legacy layout.
 
