@@ -115,6 +115,8 @@ def extract_jsonl(path: str, cache: str, *, budget_usd: float, concurrency: int,
             print(json.dumps({"done": min(start + batch, len(todo)), "of": len(todo), "elapsed_min": round((time.time() - started) / 60, 1), **{k: round(v, 3) if isinstance(v, float) else v for k, v in extractor.stats.items()}}), flush=True)
             if extractor.stats["usd"] >= budget_usd:
                 break
+            if extractor.stats["extracted"] == 0 and extractor.stats["failed"] + extractor.stats["empty"] >= min(len(todo), 200):
+                raise RuntimeError(f"no document yielded triples after {start + len(chunk)} requests ({extractor.stats}); check BEDROCK_API_KEY / BEDROCK_BASE_URL with one test call before rerunning")
     finally:
         extractor.close()
     return {"to_extract": len(todo), **extractor.stats, "minutes": round((time.time() - started) / 60, 1)}

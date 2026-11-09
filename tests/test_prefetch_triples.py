@@ -78,9 +78,26 @@ def test_dump_then_extract_offline(tmp_path, monkeypatch):
 
     def chat(prompt, max_tokens):
         calls.append(prompt)
-        return '[["h", "r", "t"]]', 100, 20
+        return "<h; r; t>", 100, 20
 
     first = extract_jsonl(str(dump), str(cache), budget_usd=5.0, concurrency=4, model="m", chat=chat, batch=4)
     assert first["to_extract"] == 6 and len(calls) == 6
     again = extract_jsonl(str(dump), str(cache), budget_usd=5.0, concurrency=4, model="m", chat=chat)
     assert again["to_extract"] == 0 and len(calls) == 6  # resumable: nothing left
+
+
+def test_extract_aborts_when_nothing_yields_triples(tmp_path):
+    import json
+
+    import pytest
+
+    from grasp_grpo.prefetch_triples import extract_jsonl
+
+    dump = tmp_path / "missing.jsonl"
+    dump.write_text("".join(json.dumps({"doc_id": f"d{i}", "title": "", "text": "t"}) + "\n" for i in range(10)), encoding="utf-8")
+
+    def broken(prompt, max_tokens):
+        raise PermissionError("invalid key")
+
+    with pytest.raises(RuntimeError, match="BEDROCK_API_KEY"):
+        extract_jsonl(str(dump), str(tmp_path / "c.sqlite"), budget_usd=5.0, concurrency=2, model="m", chat=broken, batch=5)

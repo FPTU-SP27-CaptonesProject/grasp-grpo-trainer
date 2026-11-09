@@ -84,6 +84,13 @@ def test_bad_request_is_cached_empty_other_errors_are_not(tmp_path):
     assert rows(cache) == {"long": (MODEL, [])}
 
 
+def test_only_too_long_bad_requests_count_as_document_errors():
+    from grasp_grpo.extractor import _is_too_long
+
+    assert _is_too_long("Error code: 400 - This model's maximum context length is 32768 tokens")
+    assert not _is_too_long("Error code: 400 - The security token included in the request is invalid")
+
+
 def test_retriever_flags_only_documents_missing_from_cache(tmp_path, passages):  # noqa: F811
     cache = project_a_cache(tmp_path)  # d0, d1 cached; d2 missing
     retriever = DenseRetriever.from_parts(FakeIndex(), FakeEncoder(), passages, top_k=3, triple_cache=str(cache))

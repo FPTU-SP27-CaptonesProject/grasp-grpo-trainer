@@ -128,6 +128,17 @@ class _BadRequest(Exception):
     pass
 
 
+# Only an over-long document is a property of the document (Project A caches it as empty). Any other 400 is
+# about the request, e.g. a mistyped key, which Bedrock answers with 400 too: caching those wrote 8,500
+# false "no triples" rows in a minute (2026-11-10), so they now count as failures and are retried later.
+_TOO_LONG = ("context", "too long", "too many tokens", "maximum", "max_tokens", "input length", "token limit")
+
+
+def _is_too_long(message: str) -> bool:
+    lowered = message.lower()
+    return any(marker in lowered for marker in _TOO_LONG)
+
+
 def _bedrock_chat(model: str):
     from openai import BadRequestError, OpenAI
 
@@ -139,8 +150,10 @@ def _bedrock_chat(model: str):
     def chat(prompt: str, max_tokens: int) -> tuple[str, int, int]:
         try:
             response = client.chat.completions.create(model=model, messages=[{"role": "user", "content": prompt}], temperature=0.0, max_tokens=max_tokens)
-        except BadRequestError as error:  # e.g. a document over the context limit
-            raise _BadRequest(str(error)) from error
+        except BadRequestError as error:
+            if _is_too_long(str(error)):  # a document over the context limit: cached as empty
+                raise _BadRequest(str(error)) from error
+            raise
         usage = response.usage
         return response.choices[0].message.content or "", getattr(usage, "prompt_tokens", 0) or 0, getattr(usage, "completion_tokens", 0) or 0
 
