@@ -12,4 +12,7 @@ args=(--qa "$QA_FILE" --eval-qa "$EVAL_QA" --eval-ids "$EVAL_IDS" --corpus-confi
   --depth "${PREFETCH_DEPTH:-20}" --extract-budget-usd "${PREFETCH_BUDGET_USD:-40}" --extract-concurrency "${PREFETCH_CONCURRENCY:-48}")
 [[ "${PREFETCH_DRY_RUN:-0}" == "1" ]] && args+=(--dry-run)
 [[ -n "${PREFETCH_LIMIT:-}" ]] && args+=(--limit "$PREFETCH_LIMIT")
+# PREFETCH_DUMP=path: also write the missing passages there, to extract them off the GPU host with
+# grasp-prefetch-triples --from-jsonl path --triple-cache triples.sqlite
+[[ -n "${PREFETCH_DUMP:-}" ]] && args+=(--dump-missing "$PREFETCH_DUMP")
 CUDA_VISIBLE_DEVICES="$TRAIN_GPU" grasp-prefetch-triples "${args[@]}" 2>&1 | tee -a "$LOG"

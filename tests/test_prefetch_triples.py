@@ -59,3 +59,28 @@ def test_dry_run_counts_without_extracting(monkeypatch):
     report = prefetch(router(extractor), EXAMPLES, depth=10, dry_run=True)
     assert extractor.filled == []
     assert report["missing"] == 6 and report["estimated_usd"] >= 0
+
+
+def test_dump_then_extract_offline(tmp_path, monkeypatch):
+    import json
+
+    from grasp_grpo.prefetch_triples import extract_jsonl
+
+    monkeypatch.setattr("grasp_grpo.prefetch_triples.extraction_stats", lambda r: None)
+    dump = tmp_path / "missing.jsonl"
+    with dump.open("w", encoding="utf-8") as handle:
+        report = prefetch(router(FakeExtractor()), EXAMPLES, depth=10, dry_run=True, dump=handle)
+    rows = [json.loads(line) for line in dump.read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == report["missing"] == 6 and {"doc_id", "title", "text"} <= rows[0].keys()
+
+    cache = tmp_path / "triples.sqlite"
+    calls = []
+
+    def chat(prompt, max_tokens):
+        calls.append(prompt)
+        return '[["h", "r", "t"]]', 100, 20
+
+    first = extract_jsonl(str(dump), str(cache), budget_usd=5.0, concurrency=4, model="m", chat=chat, batch=4)
+    assert first["to_extract"] == 6 and len(calls) == 6
+    again = extract_jsonl(str(dump), str(cache), budget_usd=5.0, concurrency=4, model="m", chat=chat)
+    assert again["to_extract"] == 0 and len(calls) == 6  # resumable: nothing left

@@ -8,13 +8,18 @@ retrieves. This fills them first; the run's live extraction then only handles th
 
 `--dry-run` only counts the missing documents and estimates the cost. Reruns skip cached documents, so an
 interrupted prefetch resumes where it stopped.
+
+Split mode (the Bedrock calls need no GPU): on the GPU host, `--dry-run --dump-missing missing.jsonl` writes
+the missing passages; anywhere else, `--from-jsonl missing.jsonl --triple-cache triples.sqlite` extracts them.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Any
 
 from .data import read_examples
@@ -43,7 +48,7 @@ def _uncached(child, passages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [p for p in passages if p["doc_id"] not in cached]
 
 
-def prefetch(retriever, examples: list[dict[str, Any]], *, depth: int, dry_run: bool, workers: int = 8, log_every: int = 200) -> dict[str, Any]:
+def prefetch(retriever, examples: list[dict[str, Any]], *, depth: int, dry_run: bool, workers: int = 8, log_every: int = 200, dump=None) -> dict[str, Any]:
     """Search each question (serially: the retrievers are not thread-safe) and extract the missing
     documents in the background. Returns document counts and extraction stats."""
     children = _children(retriever)
@@ -68,6 +73,9 @@ def prefetch(retriever, examples: list[dict[str, Any]], *, depth: int, dry_run: 
             counts["questions"] += 1
             counts["documents"] += len(fresh)
             counts["missing"] += len(missing)
+            if dump is not None:
+                for passage in missing:
+                    dump.write(json.dumps({"doc_id": passage["doc_id"], "title": passage.get("title") or "", "text": passage["text"]}, ensure_ascii=False) + "\n")
             if missing and not dry_run and getattr(child, "extractor", None) is not None:
                 pending.append(pool.submit(child.extractor.fill, missing))
             if counts["questions"] % log_every == 0:
@@ -80,9 +88,43 @@ def prefetch(retriever, examples: list[dict[str, Any]], *, depth: int, dry_run: 
     return {**counts, "estimated_usd": round(counts["missing"] * USD_PER_DOC, 2), "extraction": extraction_stats(retriever), "minutes": round((time.time() - started) / 60, 1)}
 
 
+def extract_jsonl(path: str, cache: str, *, budget_usd: float, concurrency: int, model: str | None = None, chat=None, batch: int = 500) -> dict[str, Any]:
+    """Extract every passage of a --dump-missing file that the cache still lacks (resumable)."""
+    from .extractor import DEFAULT_MODEL, TripleExtractor
+
+    with sqlite3.connect(str(Path(cache).resolve())) as db:
+        try:
+            cached = {str(row[0]) for row in db.execute("SELECT DISTINCT doc_id FROM triples")}
+        except sqlite3.OperationalError:  # new cache file
+            cached = set()
+    todo, seen = [], set()
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            if line.strip():
+                item = json.loads(line)
+                if item["doc_id"] not in cached and item["doc_id"] not in seen:
+                    seen.add(item["doc_id"])
+                    todo.append(item)
+    extractor = TripleExtractor(cache, chat=chat, model=model or DEFAULT_MODEL, budget_usd=budget_usd, concurrency=concurrency)
+    started = time.time()
+    print(json.dumps({"to_extract": len(todo), "already_cached": len(cached)}), flush=True)
+    try:
+        for start in range(0, len(todo), batch):
+            chunk = [{**item, "needs_triples": True} for item in todo[start : start + batch]]
+            extractor.fill(chunk)
+            print(json.dumps({"done": min(start + batch, len(todo)), "of": len(todo), "elapsed_min": round((time.time() - started) / 60, 1), **{k: round(v, 3) if isinstance(v, float) else v for k, v in extractor.stats.items()}}), flush=True)
+            if extractor.stats["usd"] >= budget_usd:
+                break
+    finally:
+        extractor.close()
+    return {"to_extract": len(todo), **extractor.stats, "minutes": round((time.time() - started) / 60, 1)}
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Fill the triple cache for the top documents of every question before training")
-    parser.add_argument("--qa", action="append", required=True, help="training QA JSONL (repeatable)")
+    parser.add_argument("--qa", action="append", help="training QA JSONL (repeatable)")
+    parser.add_argument("--dump-missing", help="write the missing passages (doc_id, title, text) to this JSONL")
+    parser.add_argument("--from-jsonl", help="extract the passages of a --dump-missing file; needs only --triple-cache and BEDROCK_API_KEY")
     parser.add_argument("--eval-qa", help="eval QA JSONL; with --eval-ids only the fixed eval questions")
     parser.add_argument("--eval-ids")
     parser.add_argument("--depth", type=int, default=20, help="documents kept per question (training retrieves 10 per query)")
@@ -91,6 +133,14 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--limit", type=int, help="first N questions only (a timing probe)")
     add_retrieval_arguments(parser)
     args = parser.parse_args(argv)
+    if args.from_jsonl:
+        if not args.triple_cache:
+            parser.error("--from-jsonl needs --triple-cache")
+        report = extract_jsonl(args.from_jsonl, args.triple_cache, budget_usd=args.extract_budget_usd, concurrency=args.extract_concurrency, model=args.extract_model)
+        print(json.dumps({"extract": report}, indent=2), flush=True)
+        return
+    if not args.qa:
+        parser.error("--qa is required unless --from-jsonl is given")
     args.extract_triples = not args.dry_run
     examples = [x for path in args.qa for x in read_examples(path)]
     if args.eval_qa:
@@ -98,9 +148,12 @@ def main(argv: list[str] | None = None) -> None:
     if args.limit:
         examples = examples[: args.limit]
     retriever = retriever_from_args(args)
+    dump = open(args.dump_missing, "w", encoding="utf-8") if args.dump_missing else None  # noqa: SIM115
     try:
-        report = prefetch(retriever, examples, depth=args.depth, dry_run=args.dry_run, workers=args.workers)
+        report = prefetch(retriever, examples, depth=args.depth, dry_run=args.dry_run, workers=args.workers, dump=dump)
     finally:
+        if dump is not None:
+            dump.close()
         retriever.close()  # also waits for and closes the extractors
     print(json.dumps({"prefetch": report, "dry_run": args.dry_run}, indent=2), flush=True)
 
