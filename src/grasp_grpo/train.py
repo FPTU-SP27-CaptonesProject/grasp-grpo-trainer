@@ -92,6 +92,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     # misc
     p.add_argument("--save-every", type=int, default=50)
     p.add_argument("--seed", type=int, default=42)
+    # Questions are taken in file order from this index (wrapping around). Every run used to start at 0, so the
+    # full run (2026-11-10) replayed the pilot's first ~1,700 questions; the pilot had consumed ~3,700.
+    p.add_argument("--question-offset", type=int, default=0, help="start the training question cursor here")
     p.add_argument("--load-in-4bit", action="store_true", help="nf4 base (slower generation, less memory); default bf16")
     p.add_argument("--no-initial-retrieval", action="store_true")
     return p.parse_args(argv)
@@ -195,7 +198,7 @@ def main(argv: list[str] | None = None) -> None:
     pool = ThreadPoolExecutor(max_workers=args.workers)
     prefetcher = ThreadPoolExecutor(max_workers=1) if args.async_rollout else None
     max_attempts = math.ceil(args.questions_per_iteration * (1 + args.max_refill_factor))
-    cursor = 0
+    cursor = max(0, args.question_offset)
 
     def collect(step: int, generate_fn) -> dict[str, Any]:
         """Streamed dynamic sampling: start questions x oversample trees at once; whenever one finishes without
