@@ -66,9 +66,41 @@ def read_run(run: Path) -> dict:
     return out
 
 
+def chain_run(parent: dict, child: dict, at: int) -> dict:
+    """One continuous run: the parent's steps 1..at, then the child (which started from the parent's
+    step-`at` adapter) shifted by `at` steps and by the parent's hours up to that step."""
+    head = [m for m in parent["metrics"] if m.get("step", 0) <= at]
+    hours = next((m.get("elapsed_hours") for m in reversed(head) if m.get("elapsed_hours") is not None), 0.0) or 0.0
+
+    def shift(row: dict) -> dict:
+        row = {**row, "step": row.get("step", 0) + at}
+        if row.get("elapsed_hours") is not None:
+            row["elapsed_hours"] += hours
+        return row
+
+    return {
+        **child,
+        "name": f"{child['name']} + {parent['name']} 1-{at}",
+        "chain": {"parent": parent["name"], "child": child["name"], "at": at},
+        "metrics": head + [shift(m) for m in child["metrics"]],
+        "eval_history": [e for e in parent["eval_history"] if e.get("step", 0) <= at] + [shift(e) for e in child["eval_history"] if e.get("step", 0) > 0],
+    }
+
+
+def add_chains(runs: list[dict], chains: list[str]) -> list[dict]:
+    by_name = {r["name"]: r for r in runs}
+    out = []
+    for spec in chains:  # CHILD=PARENT:STEP
+        child, _, rest = spec.partition("=")
+        parent, _, at = rest.partition(":")
+        if child in by_name and parent in by_name and at.isdigit():
+            out.append(chain_run(by_name[parent], by_name[child], int(at)))
+    return out + runs
+
+
 class Store:
-    def __init__(self, repo: str, cache: Path, refresh: int, local: Path | None):
-        self.repo, self.cache, self.refresh, self.local = repo, cache, refresh, local
+    def __init__(self, repo: str, cache: Path, refresh: int, local: Path | None, chains: list[str] | None = None):
+        self.repo, self.cache, self.refresh, self.local, self.chains = repo, cache, refresh, local, chains or []
         self.lock, self.fetched, self.error = threading.Lock(), 0.0, None
         self.remote_runs: set[str] | None = None  # runs that still exist on HF (local cache never deletes)
 
@@ -88,7 +120,7 @@ class Store:
             root = self.local or (self.cache / "runs")
             keep = self.remote_runs if self.local is None else None
             runs = [read_run(p) for p in sorted(root.iterdir()) if p.is_dir() and (keep is None or p.name in keep)] if root.is_dir() else []
-            return {"repo": self.repo, "fetched": self.fetched, "error": self.error, "runs": runs}
+            return {"repo": self.repo, "fetched": self.fetched, "error": self.error, "runs": add_chains(runs, self.chains)}
 
 
 def main() -> None:
@@ -99,8 +131,12 @@ def main() -> None:
     parser.add_argument("--cache", default=str(Path.home() / ".cache" / "grasp-grpo-dashboard"))
     parser.add_argument("--local-runs", help="read run folders from disk instead of HF (debugging)")
     parser.add_argument("--no-browser", action="store_true")
+    # The full run continues from the pilot's step-100 adapter (pilot-best-step100).
+    parser.add_argument("--chain", action="append", metavar="CHILD=PARENT:STEP",
+                        help="also show CHILD drawn after PARENT's steps 1..STEP as one run (repeatable); default grpo-final=stage3:100")
     args = parser.parse_args()
-    store = Store(args.repo, Path(args.cache), args.refresh, Path(args.local_runs) if args.local_runs else None)
+    store = Store(args.repo, Path(args.cache), args.refresh, Path(args.local_runs) if args.local_runs else None,
+                  args.chain if args.chain is not None else ["grpo-final=stage3:100"])
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):

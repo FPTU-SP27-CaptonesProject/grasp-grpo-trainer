@@ -137,7 +137,15 @@ function stage0F1() {
   return null;
 }
 
+let JOIN = null;  // step where a chained run's child starts (dashboard.py --chain)
+
 function plot(id, traces, lay) {
+  if (JOIN !== null && id !== "c-gpu") {
+    lay = Object.assign({}, lay, {
+      shapes: [...(lay.shapes || []), {type: "line", xref: "x", yref: "paper", x0: JOIN, x1: JOIN, y0: 0, y1: 1, line: {color: css("--muted"), width: 1, dash: "dot"}}],
+      annotations: [...(lay.annotations || []), {x: JOIN, xref: "x", y: 1, yref: "paper", text: "full run", showarrow: false, xanchor: "left", yanchor: "top", font: {size: 11, color: css("--muted")}}],
+    });
+  }
   Plotly.react(id, traces, lay, {displaylogo: false, responsive: true, modeBarButtonsToRemove: ["lasso2d", "select2d"]});
 }
 
@@ -148,7 +156,9 @@ function renderRun(run) {
   const manifest = run.reports.run_manifest, cfg = run.reports.grpo_config || {};
   const s0 = stage0F1();
   const last = m[m.length - 1] || {};
-  const total = (cfg.config && cfg.config.iterations) || cfg.iterations;
+  JOIN = run.chain ? run.chain.at : null;
+  const iters = (cfg.config && cfg.config.iterations) || cfg.iterations;
+  const total = iters && JOIN !== null ? iters + JOIN : iters;
   const best = ev.reduce((b, e) => (b === null || e.f1 > b.f1) ? e : b, null);
   const lastEval = ev[ev.length - 1];
   const sftRef = s0 ?? PROJECT_A_SFT_F1;
