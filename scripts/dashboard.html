@@ -173,7 +173,7 @@ function renderRun(run) {
   if (m.length) {
     charts.append(card("c-reward", "Reward khi rollout", "Mảnh: từng bước · đậm: trung bình 10 bước"));
     charts.append(card("c-f1rec", "F1 câu trả lời và recall khi rollout", "Trung bình 10 bước"));
-    charts.append(card("c-kl", "KL so với SFT", "Tăng đều là bình thường; vọt lên là dấu hiệu lệch"));
+    charts.append(card("c-kl", "KL so với SFT", "Trục từ 0 · mảnh: từng bước · đậm: TB 10 bước. Tăng đều là bình thường; vọt lên là dấu hiệu lệch"));
     charts.append(card("c-entropy", "Entropy của policy"));
     charts.append(card("c-zero", "Tỷ lệ nhóm không tín hiệu", "Mọi nhánh cùng reward → không học được"));
     charts.append(card("c-format", "Tỷ lệ đúng định dạng theo vai", "Trung bình 10 bước"));
@@ -197,7 +197,10 @@ function renderRun(run) {
     const x = m.map(r => r.step), col = k => m.map(r => r[k] ?? null);
     plot("c-reward", [line(x, col("mean_reward"), "từng bước", c1, {line: {color: c1, width: 1}, opacity: 0.35}), line(x, rolling(col("mean_reward")), "TB 10 bước", c1)], layout("reward"));
     plot("c-f1rec", [line(x, rolling(col("mean_answer_f1")), "F1 câu trả lời", c1), line(x, rolling(col("mean_context_recall")), "context recall", c2)], layout("0–1"));
-    plot("c-kl", [line(x, col("kl"), "KL", c1)], layout("KL", {showlegend: false}));
+    // Y from 0: a run continued from the pilot starts at its KL (~0.003), and an auto-scaled axis
+    // then blows batch noise (±0.0005) up to the full chart height.
+    plot("c-kl", [line(x, col("kl"), "từng bước", c1, {line: {color: c1, width: 1}, opacity: 0.35}), line(x, rolling(col("kl")), "TB 10 bước", c1)],
+      layout("KL", {yaxis: {title: {text: "KL"}, rangemode: "tozero", gridcolor: css("--grid"), linecolor: css("--axis"), zeroline: false}}));
     plot("c-entropy", [line(x, col("entropy"), "entropy", c1)], layout("nats/token", {showlegend: false}));
     plot("c-zero", [line(x, col("zero_signal_fraction"), "từng bước", c1, {line: {color: c1, width: 1}, opacity: 0.35}), line(x, rolling(col("zero_signal_fraction")), "TB 10 bước", c1)], layout("tỷ lệ"));
     plot("c-format", [line(x, rolling(col("format_rate_rd")), "RD", c1), line(x, rolling(col("format_rate_qf")), "QF", c2), line(x, rolling(col("format_rate_ki")), "KI", c3)], layout("tỷ lệ"));
