@@ -126,6 +126,7 @@ class Store:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--repo", default="doancuavahk/grasp-grpo-logs")
+    parser.add_argument("--host", default="127.0.0.1", help="0.0.0.0 inside the HF Space container")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--refresh", type=int, default=60, help="seconds between pulls from HF")
     parser.add_argument("--cache", default=str(Path.home() / ".cache" / "grasp-grpo-dashboard"))
@@ -157,7 +158,7 @@ def main() -> None:
         def log_message(self, *_):
             pass
 
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    server = ThreadingHTTPServer((args.host, args.port), Handler)
     url = f"http://127.0.0.1:{args.port}"
     print(f"dashboard: {url}  (logs from {args.local_runs or args.repo}, refresh {args.refresh}s; Ctrl+C to stop)")
     if not args.no_browser:

@@ -272,7 +272,7 @@ function render() {
   if ([...sel.options].map(o => o.value).join() !== names.join()) {
     sel.replaceChildren(...names.map(n => el("option", {value: n}, n)));
     const saved = (() => { try { return localStorage.getItem("grpo-run"); } catch { return null; } })();
-    sel.value = names.includes(keep) ? keep : (names.includes(saved) ? saved : names[names.length - 1] || "");
+    sel.value = names.includes(keep) ? keep : (names.includes(saved) ? saved : (DATA.runs.find(r => r.chain) || {}).name || names[names.length - 1] || "");
   }
   const run = DATA.runs.find(r => r.name === sel.value);
   const when = DATA.fetched ? new Date(DATA.fetched * 1000).toLocaleTimeString() : "—";
