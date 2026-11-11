@@ -68,7 +68,10 @@ def run_single_step(reader, retriever, example: dict[str, Any], *, emit: Emit = 
     return _record(example, answer, context, 1)
 
 
-def run_ircot(reader, retriever, example: dict[str, Any], *, max_steps: int = 5, docs_per_step: int = 3, emit: Emit = None) -> dict[str, Any]:
+def run_ircot(reader, retriever, example: dict[str, Any], *, max_steps: int = 5, docs_per_step: int = 3, max_context_docs: int = 15,
+              emit: Emit = None) -> dict[str, Any]:
+    """`max_context_docs` caps the context like IRCoT's paragraph budget. 15 = GRASP's most (top-10 plus one
+    evidence per step for 5 steps); uncapped, 10 + 3x5 docs overflowed the reader's 8192 tokens (2026-11-12)."""
     _select(retriever, example)
     question = example["question"]
     context = list(retriever.search(question))
@@ -86,7 +89,10 @@ def run_ircot(reader, retriever, example: dict[str, Any], *, max_steps: int = 5,
             break
         thoughts.append(result.thought)
         _emit(emit, "thought", {"step": step, "text": result.thought})
-        new = [d for d in retriever.search(result.thought) if d["doc_id"] not in seen][:docs_per_step]
+        room = min(docs_per_step, max_context_docs - len(context))
+        if room <= 0:
+            continue  # context full: the reader keeps reasoning over what it has
+        new = [d for d in retriever.search(result.thought) if d["doc_id"] not in seen][:room]
         retrievals += 1
         seen.update(d["doc_id"] for d in new)
         context.extend(new)
@@ -140,6 +146,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--bedrock-model", default="qwen.qwen3-235b-a22b-2507")
     p.add_argument("--max-steps", type=int, default=5)
     p.add_argument("--docs-per-step", type=int, default=3)
+    p.add_argument("--max-context-docs", type=int, default=15, help="IRCoT context cap (GRASP's most: top-k + max-steps)")
     p.add_argument("--workers", type=int, default=16)
     p.add_argument("--limit", type=int)
     p.add_argument("--output", required=True)
@@ -157,13 +164,23 @@ def main(argv: list[str] | None = None) -> None:
     reader = bedrock_reader(args.bedrock_model) if args.method == "single-bedrock" else reader_from_args(args)
     lock = threading.Lock()
 
-    def one(example: dict[str, Any]) -> dict[str, Any]:
+    errors: list[dict[str, str]] = []
+
+    def run(example: dict[str, Any]) -> dict[str, Any]:
         bound = BoundRetriever(retriever, example, lock) if retriever is not None else None
         if args.method == "llm":
             return run_llm_only(reader, bound, example)
         if args.method == "ircot":
-            return run_ircot(reader, bound, example, max_steps=args.max_steps, docs_per_step=args.docs_per_step)
+            return run_ircot(reader, bound, example, max_steps=args.max_steps, docs_per_step=args.docs_per_step, max_context_docs=args.max_context_docs)
         return run_single_step(reader, bound, example)
+
+    def one(example: dict[str, Any]) -> dict[str, Any]:
+        """A failing question scores 0 and is listed in `errors`; it must not lose the other 998."""
+        try:
+            return run(example)
+        except Exception as error:  # noqa: BLE001
+            errors.append({"id": example["id"], "error": f"{type(error).__name__}: {str(error)[:300]}"})
+            return _record(example, "", [], 0)
 
     started = time.monotonic()
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
@@ -173,9 +190,10 @@ def main(argv: list[str] | None = None) -> None:
         retriever.close()
     report.update(method=args.method, reader=args.bedrock_model if args.method == "single-bedrock" else args.reader_model,
                   eval_ids=args.eval_ids, top_k=args.top_k, max_steps=args.max_steps, docs_per_step=args.docs_per_step,
+                  max_context_docs=args.max_context_docs, error_count=len(errors), errors=errors,
                   predictions=[{k: p[k] for k in ("id", "prediction", "context_doc_ids", "retrievals")} for p in predictions])
     write_json(args.output, report)
-    print(json.dumps({k: v for k, v in report.items() if k not in ("per_question", "predictions")}), flush=True)
+    print(json.dumps({k: v for k, v in report.items() if k not in ("per_question", "predictions", "errors")}), flush=True)
 
 
 if __name__ == "__main__":

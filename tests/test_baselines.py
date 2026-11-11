@@ -131,3 +131,24 @@ def test_report_table_orders_methods(tmp_path):
     text = table([rep("grasp-grpo", 0.6, method=False), rep("ircot", 0.5), rep("llm", 0.2)])
     rows = [line.split("|")[1].strip() for line in text.splitlines()[2:]]
     assert rows == ["llm", "ircot", "grasp-grpo"] and "0.600" in text and "| – |" in text
+
+
+def test_ircot_caps_the_context():
+    retriever, reader = Retriever(), Reader()
+    out = baselines.run_ircot(reader, retriever, EXAMPLE, max_steps=5, docs_per_step=3, max_context_docs=6)
+    assert len(out["context_doc_ids"]) == 6  # 4 from the question + 2 (room), then no more searches
+    assert retriever.queries == ["Q?", "t1"] and out["retrievals"] == 2
+
+
+def test_cli_scores_a_failing_question_zero(tmp_path, monkeypatch):
+    class Broken(Reader):
+        def final(self, *args):
+            raise RuntimeError("context too long")
+
+    monkeypatch.setattr(baselines, "retriever_from_args", lambda args: type("R", (Retriever,), {"close": lambda self: None})())
+    monkeypatch.setattr(baselines, "reader_from_args", lambda args: Broken())
+    monkeypatch.setattr(baselines, "read_examples", lambda path: [EXAMPLE])
+    out = tmp_path / "r.json"
+    baselines.main(["--method", "single", "--qa", "x", "--corpus-config", "c.json", "--reader-model", "r", "--output", str(out)])
+    report = json.loads(out.read_text(encoding="utf-8"))
+    assert report["f1"] == 0.0 and report["error_count"] == 1 and "context too long" in report["errors"][0]["error"]
