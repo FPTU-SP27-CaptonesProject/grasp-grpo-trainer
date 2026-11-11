@@ -94,6 +94,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=42)
     # Questions are taken in file order from this index (wrapping around). Every run used to start at 0, so the
     # full run (2026-11-10) replayed the pilot's first ~1,700 questions; the pilot had consumed ~3,700.
+    p.add_argument("--initial-eval", action="store_true", help="eval the starting adapter before step 1 even when --sft-f1 is given (a resumed run's start)")
     p.add_argument("--question-offset", type=int, default=0, help="start the training question cursor here")
     p.add_argument("--load-in-4bit", action="store_true", help="nf4 base (slower generation, less memory); default bf16")
     p.add_argument("--no-initial-retrieval", action="store_true")
@@ -254,8 +255,10 @@ def main(argv: list[str] | None = None) -> None:
         tqdm.write(json.dumps({"eval": summary}))
         return summary
 
-    if eval_examples is not None and args.sft_f1 is None:
-        stopper.set_baseline(run_eval(0)["f1"])
+    if eval_examples is not None and (args.sft_f1 is None or args.initial_eval):
+        initial_f1 = run_eval(0)["f1"]
+        if args.sft_f1 is None:
+            stopper.set_baseline(initial_f1)
 
     metrics: list[dict[str, Any]] = []
     live_log = output / "metrics.jsonl"  # one line per step, for the live dashboard (metrics.json is only rewritten at saves)
