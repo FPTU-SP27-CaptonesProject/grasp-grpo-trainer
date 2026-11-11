@@ -126,3 +126,60 @@ def test_async_loop_samples_one_step_behind_and_trains_on_sampler_logprobs(harne
     rows = metrics(harness.out)
     assert [r["step"] for r in rows] == [1, 2, 3] and all(r["leaves"] - r["zero_signal_groups"] == 2 for r in rows)
     assert all("rollout_wait_seconds" in r for r in rows)
+
+
+def resumed_run(harness, monkeypatch, *extra):
+    """Run 2 steps, then resume from <out>/resume to step 4 (fresh process state: new policy fake, new optimizer)."""
+    seen = []
+    real_env = FakeEnv.run
+
+    def record(self, example):
+        seen.append(example["id"])
+        return real_env(self, example)
+
+    monkeypatch.setattr(FakeEnv, "run", record)
+    args = [a for a in harness.base]
+    args[args.index("--iterations") + 1] = "2"
+    args[args.index("--warmup-steps") + 1] = "4"
+    train.main([*args, *extra])
+    first = list(seen)
+    state = torch.load(harness.out / "resume" / "train_state.pt", weights_only=False)
+    args[args.index("--iterations") + 1] = "4"
+    train.main([*args, *extra, "--resume", str(harness.out / "resume"), "--question-offset", "999"])
+    return first, seen[len(first):], state
+
+
+@pytest.mark.parametrize("extra", [(), ("--async-rollout",)])
+def test_resume_continues_step_lr_cursor_and_optimizer(harness, monkeypatch, extra):
+    first, second, state = resumed_run(harness, monkeypatch, *extra)
+    assert state["step"] == 2 and state["optimizer"]["state"]  # Adam moments saved
+    rows = metrics(harness.out)
+    assert [r["step"] for r in rows] == [1, 2, 3, 4]  # earlier steps kept in metrics.jsonl
+    assert [r["lr"] for r in rows] == pytest.approx([1e-5 * s / 4 for s in (1, 2, 3, 4)])  # warmup not restarted
+    assert second[0] == f"q{state['cursor'] % len(EXAMPLES)}"  # picks up at the saved cursor; --question-offset ignored
+
+
+def test_resume_runs_an_eval_the_crash_skipped(harness, monkeypatch):
+    evals = []
+    monkeypatch.setattr(train, "load_eval_examples", lambda qa, ids: [{"id": "e"}])
+    monkeypatch.setattr(train, "evaluate_policy", lambda *a, **k: evals.append(1) or {"f1": 0.5, "per_question": []})
+    real = train.EarlyStopper.after_eval
+    crashed = {"done": False}
+
+    def crash_once(self, *, step, f1):
+        if step == 2 and not crashed["done"]:
+            crashed["done"] = True
+            raise RuntimeError("eval crashed")
+        return real(self, step=step, f1=f1)
+
+    monkeypatch.setattr(train.EarlyStopper, "after_eval", crash_once)
+    args = [*harness.base, "--eval-qa", "dev.jsonl", "--eval-every", "2", "--sft-f1", "0.5"]
+    args[args.index("--iterations") + 1] = "4"
+    with pytest.raises(RuntimeError):
+        train.main(args)
+    assert torch.load(harness.out / "resume" / "train_state.pt", weights_only=False)["step"] == 2  # saved before the eval
+    train.main([*args, "--resume", str(harness.out / "resume")])
+    history = json.loads((harness.out / "eval_history.json").read_text())
+    assert len(evals) == 3  # step 2 (crashed), step 2 again on resume, step 4
+    assert [e["step"] for e in history] == [2, 4]  # history comes from the saved state, so no duplicate
+    assert [r["step"] for r in metrics(harness.out)] == [1, 2, 3, 4]

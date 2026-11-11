@@ -125,6 +125,7 @@ train_args() {
   # Skip questions an earlier run already trained on (the pilot used the first ~3,700).
   if [[ -n "${QUESTION_OFFSET:-}" ]]; then TRAIN_ARGS+=(--question-offset "$QUESTION_OFFSET"); fi
   if [[ "${INITIAL_EVAL:-0}" == 1 ]]; then TRAIN_ARGS+=(--initial-eval); fi
+  if [[ -n "${RESUME:-}" ]]; then TRAIN_ARGS+=(--resume "$RESUME"); fi
   # The trainer sees TRAIN_GPU as cuda:0; RETRIEVER_GPU (the vLLM GPU, ~2 GB free) becomes cuda:1 for E5.
   TRAIN_DEVICES="$TRAIN_GPU"
   if [[ -n "${RETRIEVER_GPU:-}" && "$RETRIEVER_GPU" != "$TRAIN_GPU" ]]; then

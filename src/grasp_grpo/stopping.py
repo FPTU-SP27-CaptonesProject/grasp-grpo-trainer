@@ -31,6 +31,16 @@ class EarlyStopper:
         self.best_f1: float | None = None
         self.best_step: int | None = None
 
+    _STATE = ("sft_f1", "reference_f1", "initial_entropy", "evals_without_gain", "evals_below_sft", "best_f1", "best_step")
+
+    def state_dict(self) -> dict:
+        return {**{key: getattr(self, key) for key in self._STATE}, "history": list(self.history)}
+
+    def load_state_dict(self, state: dict) -> None:
+        for key in self._STATE:
+            setattr(self, key, state[key])
+        self.history = deque((tuple(row) for row in state["history"]), maxlen=self.config.window)
+
     def set_baseline(self, f1: float) -> None:
         self.sft_f1 = self.reference_f1 = f1
 

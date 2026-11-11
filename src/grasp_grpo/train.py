@@ -96,6 +96,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     # full run (2026-11-10) replayed the pilot's first ~1,700 questions; the pilot had consumed ~3,700.
     p.add_argument("--initial-eval", action="store_true", help="eval the starting adapter before step 1 even when --sft-f1 is given (a resumed run's start)")
     p.add_argument("--question-offset", type=int, default=0, help="start the training question cursor here")
+    p.add_argument("--resume", help="continue a crashed/stopped run from a dir holding an adapter + train_state.pt (<output>/resume, "
+                   "or any checkpoint-grpo-step-*): optimizer, step, LR schedule, question cursor, early-stop state, metrics and "
+                   "evals carry on; --actor-checkpoint and --question-offset are ignored")
     p.add_argument("--load-in-4bit", action="store_true", help="nf4 base (slower generation, less memory); default bf16")
     p.add_argument("--no-initial-retrieval", action="store_true")
     return p.parse_args(argv)
@@ -148,6 +151,30 @@ def save_adapter(actor, tokenizer, path: Path, metadata: dict[str, Any]) -> Path
 
 
 
+RESUME_STATE = "train_state.pt"
+
+
+def write_train_state(path: Path, state: dict[str, Any]) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    torch.save(state, path / f"{RESUME_STATE}.tmp")
+    (path / f"{RESUME_STATE}.tmp").replace(path / RESUME_STATE)
+
+
+def save_resume_point(output: Path, actor, tokenizer, state: dict[str, Any]) -> None:
+    """<output>/resume = this step's adapter + train state, swapped in whole so a crash mid-write keeps the last one."""
+    import shutil
+
+    target, fresh, stale = output / "resume", output / "resume.new", output / "resume.old"
+    shutil.rmtree(fresh, ignore_errors=True)
+    save_adapter(actor, tokenizer, fresh, {"step": state["step"]})
+    write_train_state(fresh, state)
+    shutil.rmtree(stale, ignore_errors=True)
+    if target.exists():
+        target.replace(stale)
+    fresh.replace(target)
+    shutil.rmtree(stale, ignore_errors=True)
+
+
 def adapter_name(run_tag: str, step: int) -> str:
     return f"policy-{run_tag}-{step:06d}"
 
@@ -167,11 +194,15 @@ def main(argv: list[str] | None = None) -> None:
         raise ValueError("no valid training examples")
     eval_examples = load_eval_examples(args.eval_qa, args.eval_ids) if args.eval_qa else None
     retriever = retriever_from_args(args)
-    actor_source = args.actor_checkpoint or args.sft_checkpoint
+    resumed = torch.load(Path(args.resume) / RESUME_STATE, map_location="cpu", weights_only=False) if args.resume else None
+    actor_source = args.resume or args.actor_checkpoint or args.sft_checkpoint
     # One base model: trainable adapter "default" + the frozen SFT adapter as the KL reference.
     actor, tokenizer, _ = load_policy(actor_source, trainable=True, load_in_4bit=args.load_in_4bit, reference_checkpoint=args.sft_checkpoint)
     params = [p for p in actor.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(params, lr=args.learning_rate)
+    if resumed is not None:
+        optimizer.load_state_dict(resumed["optimizer"])  # the LR is set again every step from lr_at()
+        torch.set_rng_state(resumed["torch_rng"])
     reader = reader_from_args(args)
     lock = threading.Lock()
     policy, batcher = None, None
@@ -180,7 +211,7 @@ def main(argv: list[str] | None = None) -> None:
         # The server outlives a run (stage 1 -> 2 -> 3 share it) and keeps each run's last adapter loaded, so
         # names carry a per-run tag: a bare "policy-000020" collided with stage 1's final adapter (2026-11-07).
         run_tag = datetime.now(UTC).strftime("%m%d%H%M%S")
-        if args.actor_checkpoint:  # the server starts from the SFT adapter; continue from this one instead
+        if args.actor_checkpoint or args.resume:  # the server starts from the SFT adapter; continue from this one instead
             policy.update(save_adapter(actor, tokenizer, output / "live" / "step-000000", {"step": 0}), adapter_name(run_tag, 0))
         generate = policy.generate
     else:
@@ -199,7 +230,7 @@ def main(argv: list[str] | None = None) -> None:
     pool = ThreadPoolExecutor(max_workers=args.workers)
     prefetcher = ThreadPoolExecutor(max_workers=1) if args.async_rollout else None
     max_attempts = math.ceil(args.questions_per_iteration * (1 + args.max_refill_factor))
-    cursor = max(0, args.question_offset)
+    cursor = resumed["cursor"] if resumed is not None else max(0, args.question_offset)
 
     def collect(step: int, generate_fn) -> dict[str, Any]:
         """Streamed dynamic sampling: start questions x oversample trees at once; whenever one finishes without
@@ -236,14 +267,17 @@ def main(argv: list[str] | None = None) -> None:
                 pending -= cancelled
                 attempts -= len(cancelled)
             want = args.questions_per_iteration - len(collected) - len(pending)
-        return {"collected": collected, "zero_trees": zero_trees, "direct": direct, "attempts": attempts, "extra_trees": extra_trees, "seconds": time.monotonic() - started_at}
+        # cursor_end: where the next step's questions start (async: read before that step's collect moves it)
+        return {"collected": collected, "zero_trees": zero_trees, "direct": direct, "attempts": attempts, "extra_trees": extra_trees, "seconds": time.monotonic() - started_at, "cursor_end": cursor}
 
     def launch(step: int):
         """Start the rollouts for `step` in the background, pinned to the adapter the server serves now."""
         pinned = role_generate_fn(policy.pinned(policy.current()), temperature=args.temperature, top_p=args.top_p)
         return prefetcher.submit(collect, step, pinned)
 
-    eval_history: list[dict[str, Any]] = []
+    eval_history: list[dict[str, Any]] = list(resumed["eval_history"]) if resumed is not None else []
+    if resumed is not None:
+        stopper.load_state_dict(resumed["stopper"])
 
     def run_eval(step: int) -> dict[str, Any]:
         actor.eval()
@@ -255,19 +289,40 @@ def main(argv: list[str] | None = None) -> None:
         tqdm.write(json.dumps({"eval": summary}))
         return summary
 
-    if eval_examples is not None and (args.sft_f1 is None or args.initial_eval):
+    if resumed is None and eval_examples is not None and (args.sft_f1 is None or args.initial_eval):
         initial_f1 = run_eval(0)["f1"]
         if args.sft_f1 is None:
             stopper.set_baseline(initial_f1)
 
-    metrics: list[dict[str, Any]] = []
+    def train_state(step: int, cursor_end: int, elapsed_hours: float) -> dict[str, Any]:
+        return {"step": step, "optimizer": optimizer.state_dict(), "cursor": cursor_end, "stopper": stopper.state_dict(), "eval_history": eval_history,
+                "metrics": metrics, "elapsed_hours": elapsed_hours, "torch_rng": torch.get_rng_state(), "config": config, "saved_at_utc": _now()}
+
+    def eval_step(step: int) -> str | None:
+        summary = run_eval(step)
+        eval_reason, is_best = stopper.after_eval(step=step, f1=summary["f1"])
+        if is_best:
+            save_adapter(actor, tokenizer, output / "best", {"step": step, "eval": summary, "sft_checkpoint": str(Path(args.sft_checkpoint).resolve()), "config": config})
+        return eval_reason
+
+    metrics: list[dict[str, Any]] = list(resumed["metrics"]) if resumed is not None else []
     live_log = output / "metrics.jsonl"  # one line per step, for the live dashboard (metrics.json is only rewritten at saves)
-    live_log.write_text("", encoding="utf-8")
-    stop_reason, step = None, 0
-    started = time.monotonic()
-    upcoming = launch(1) if prefetcher is not None else None
-    progress = tqdm(total=args.iterations, desc="GRPO", unit="step", dynamic_ncols=True)
-    for step in range(1, args.iterations + 1):
+    live_log.write_text("".join(json.dumps(m) + "\n" for m in metrics), encoding="utf-8")
+    first = resumed["step"] + 1 if resumed is not None else 1
+    stop_reason, step = None, first - 1
+    started = time.monotonic() - (resumed["elapsed_hours"] * 3600 if resumed is not None else 0.0)  # max_hours counts the whole run
+    if resumed is not None:
+        tqdm.write(json.dumps({"resumed": str(Path(args.resume).resolve()), "from_step": resumed["step"], "cursor": cursor}))
+        due = resumed["step"]
+        if eval_examples is not None and due > 0 and due % args.eval_every == 0 and not any(e.get("step") == due for e in eval_history):
+            stop_reason = eval_step(due)  # the run stopped between that step's update and its eval
+            write_train_state(Path(args.resume), train_state(due, cursor, resumed["elapsed_hours"]))
+            if stop_reason:
+                tqdm.write(json.dumps({"early_stop": stop_reason, "step": due}))
+    upcoming = launch(first) if prefetcher is not None and stop_reason is None and first <= args.iterations else None
+    progress = tqdm(total=args.iterations, initial=first - 1, desc="GRPO", unit="step", dynamic_ncols=True)
+    loop_started = time.monotonic()
+    for step in range(first, args.iterations + 1 if stop_reason is None else first):
         actor.eval()  # rollouts and ratios use the same dropout-free policy
         waited = time.monotonic()
         batch = upcoming.result() if prefetcher is not None else collect(step, sample_fn)
@@ -300,7 +355,7 @@ def main(argv: list[str] | None = None) -> None:
         if extraction is not None:
             info.update(extract_usd=extraction["usd"], extract_requested=extraction["requested"], extract_failed=extraction["failed"])
         elapsed_hours = (time.monotonic() - started) / 3600
-        info.update(elapsed_hours=elapsed_hours, eta_hours=elapsed_hours / step * (args.iterations - step))
+        info.update(elapsed_hours=elapsed_hours, eta_hours=(time.monotonic() - loop_started) / (step - first + 1) * (args.iterations - step))
         metrics.append(info)
         with live_log.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(info) + "\n")
@@ -308,14 +363,14 @@ def main(argv: list[str] | None = None) -> None:
         progress.set_postfix(reward=f"{info['mean_reward'] or 0.0:.3f}", kl=f"{info.get('kl', 0.0):.4f}", zero=f"{zero_fraction:.2f}")
         progress.update(1)
         reason = stopper.after_step(format_rate=info["format_rate"], kl=info.get("kl", 0.0), entropy=info.get("entropy"), zero_signal=zero_fraction, elapsed_hours=elapsed_hours)
+        # Saved before the eval: the lr2e5 run crashed inside its step-100 eval and lost that step (2026-11-11).
+        save_resume_point(output, actor, tokenizer, train_state(step, batch["cursor_end"], elapsed_hours))
         if eval_examples is not None and step % args.eval_every == 0:
-            summary = run_eval(step)
-            eval_reason, is_best = stopper.after_eval(step=step, f1=summary["f1"])
-            if is_best:
-                save_adapter(actor, tokenizer, output / "best", {"step": step, "eval": summary, "sft_checkpoint": str(Path(args.sft_checkpoint).resolve()), "config": config})
-            reason = reason or eval_reason
+            reason = reason or eval_step(step)
+            write_train_state(output / "resume", train_state(step, batch["cursor_end"], elapsed_hours))
         if reason or step % args.save_every == 0:
-            save_adapter(actor, tokenizer, output / f"checkpoint-grpo-step-{step:06d}", {"step": step, "sft_checkpoint": str(Path(args.sft_checkpoint).resolve()), "config": config, "metrics": metrics[-50:]})
+            checkpoint = save_adapter(actor, tokenizer, output / f"checkpoint-grpo-step-{step:06d}", {"step": step, "sft_checkpoint": str(Path(args.sft_checkpoint).resolve()), "config": config, "metrics": metrics[-50:]})
+            write_train_state(Path(checkpoint), train_state(step, batch["cursor_end"], elapsed_hours))
             write_json(output / "metrics.json", metrics)
         if reason:
             stop_reason = reason
@@ -323,7 +378,7 @@ def main(argv: list[str] | None = None) -> None:
             break
     progress.close()
     if prefetcher is not None:
-        if step < args.iterations:  # stopped early: let the prefetched rollout finish before closing clients
+        if upcoming is not None and step < args.iterations:  # stopped early: let the prefetched rollout finish before closing clients
             upcoming.cancel() or upcoming.exception()
         prefetcher.shutdown()
     pool.shutdown()
