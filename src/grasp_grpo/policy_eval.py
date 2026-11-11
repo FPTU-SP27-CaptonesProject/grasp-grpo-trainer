@@ -43,7 +43,8 @@ def summarize(examples: list[dict[str, Any]], predictions: list[dict[str, Any]],
             recalls.append(len(gold & set(prediction["context_doc_ids"])) / len(gold))
         for action in prediction["actions"]:
             formats[action["role"]].append(bool(action["valid_format"]))
-        retrievals.append(sum(action["role"] == "qf" for action in prediction["actions"]))
+        # GRASP: one search per QF action; baselines (baselines.py) report their own count
+        retrievals.append(prediction.get("retrievals", sum(action["role"] == "qf" for action in prediction["actions"])))
     return {
         "questions": len(rows),
         "f1": _mean([row["f1"] for row in rows]),

@@ -50,13 +50,18 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Select the fixed GRPO eval question ids")
     parser.add_argument("--dev", required=True, help="grasp-gold-evidence dev.jsonl")
     parser.add_argument("--exclude", help="JSONL whose ids must never be selected (the training file)")
+    parser.add_argument("--exclude-ids", action="append", default=[], help="ids JSON (like the output) whose ids must not be selected; repeatable. "
+                        "The report test set excludes config/eval_ids.json, which picked checkpoints and early-stopped runs")
     parser.add_argument("--per-dataset", type=int, default=100)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output", required=True)
     args = parser.parse_args(argv)
     exclude = {str(row["id"]) for row in _jsonl(args.exclude)} if args.exclude else set()
+    for path in args.exclude_ids:
+        exclude |= set(json.loads(Path(path).read_text(encoding="utf-8"))["ids"])
     ids = select_eval_ids(_jsonl(args.dev), per_dataset=args.per_dataset, seed=args.seed, exclude=exclude)
-    write_json(args.output, {"source": Path(args.dev).name, "seed": args.seed, "per_dataset": args.per_dataset, "ids": ids})
+    write_json(args.output, {"source": Path(args.dev).name, "seed": args.seed, "per_dataset": args.per_dataset,
+                             "excluded": [Path(x).name for x in ([args.exclude] if args.exclude else []) + args.exclude_ids], "ids": ids})
     print(json.dumps({"ids": len(ids), "output": args.output}))
 
 
