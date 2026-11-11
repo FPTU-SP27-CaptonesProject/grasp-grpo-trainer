@@ -113,7 +113,9 @@ class ChatReader:
         self.client, self.model, self.max_tokens = client, model, max_tokens
 
     def final(self, question: str, context: list[dict[str, Any]], thoughts: list[str], transcript: str) -> str:
-        prompt = READER.format(context=reader_context(context) or "None", question=question)
+        # <think> is a special token for Qwen3: on Bedrock the 235B model wrote <tool_call> lines instead and often
+        # never reached <answer> (smoke run 2026-11-12, F1 0.07 vs 0.28 for the 7B on the same context).
+        prompt = READER.format(context=reader_context(context) or "None", question=question).replace("<think>", "<reason>").replace("</think>", "</reason>")
         response = self.client.chat.completions.create(model=self.model, messages=[{"role": "user", "content": prompt}], temperature=0.0, max_tokens=self.max_tokens)
         return answer_or_last_line(response.choices[0].message.content or "")
 
