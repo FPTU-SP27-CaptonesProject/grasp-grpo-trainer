@@ -355,7 +355,7 @@ def main(argv: list[str] | None = None) -> None:
         if extraction is not None:
             info.update(extract_usd=extraction["usd"], extract_requested=extraction["requested"], extract_failed=extraction["failed"])
         elapsed_hours = (time.monotonic() - started) / 3600
-        info.update(elapsed_hours=elapsed_hours, eta_hours=(time.monotonic() - loop_started) / (step - first + 1) * (args.iterations - step))
+        info.update(elapsed_hours=elapsed_hours, eta_hours=(time.monotonic() - loop_started) / 3600 / (step - first + 1) * (args.iterations - step))
         metrics.append(info)
         with live_log.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(info) + "\n")
