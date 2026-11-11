@@ -70,8 +70,11 @@ def _by_dataset(examples: list[dict[str, Any]], rows: list[dict[str, Any]], by_i
     return {name: {"questions": len(g["f1"]), "f1": _mean(g["f1"]), "em": _mean(g["em"]), "context_recall": _mean(g["recall"])} for name, g in sorted(groups.items())}
 
 
-def evaluate_policy(generate_fn, reader, retriever, examples: list[dict[str, Any]], *, max_steps: int, workers: int) -> dict[str, Any]:
-    lock = threading.Lock()
+def evaluate_policy(generate_fn, reader, retriever, examples: list[dict[str, Any]], *, max_steps: int, workers: int, lock: threading.Lock | None = None) -> dict[str, Any]:
+    """`lock` must be the one every other user of `retriever` holds (training's async rollouts keep running
+    during eval): the retriever's sqlite connections and its selected corpus are not thread-safe. A private
+    lock here let eval and step-101 rollouts interleave and crashed the 2026-11-11 run at the step-100 eval."""
+    lock = lock or threading.Lock()
     started = time.monotonic()
 
     def one(example: dict[str, Any]) -> dict[str, Any]:

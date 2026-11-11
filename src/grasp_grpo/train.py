@@ -246,7 +246,7 @@ def main(argv: list[str] | None = None) -> None:
 
     def run_eval(step: int) -> dict[str, Any]:
         actor.eval()
-        report = evaluate_policy(greedy_fn, reader, retriever, eval_examples, max_steps=args.max_steps, workers=args.eval_workers)
+        report = evaluate_policy(greedy_fn, reader, retriever, eval_examples, max_steps=args.max_steps, workers=args.eval_workers, lock=lock)
         summary = {key: value for key, value in report.items() if key != "per_question"}
         summary["step"] = step
         eval_history.append(summary)
