@@ -36,6 +36,7 @@ grasp-eval-policy = "grasp_grpo.policy_eval:main"
 grasp-stage-gate = "grasp_grpo.stage_gate:main"
 grasp-sync-logs = "grasp_grpo.log_sync:main"
 grasp-prefetch-triples = "grasp_grpo.prefetch_triples:main"
+grasp-reward-probe = "grasp_grpo.reward_probe:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
