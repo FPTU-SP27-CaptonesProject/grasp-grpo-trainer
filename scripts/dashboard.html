@@ -137,13 +137,13 @@ function stage0F1() {
   return null;
 }
 
-let JOIN = null;  // step where a chained run's child starts (dashboard.py --chain)
+let JOINS = [];  // [{at, label}]: steps where a chained run's next segment starts (dashboard.py --chain)
 
 function plot(id, traces, lay) {
-  if (JOIN !== null && id !== "c-gpu") {
+  if (JOINS.length && id !== "c-gpu") {
     lay = Object.assign({}, lay, {
-      shapes: [...(lay.shapes || []), {type: "line", xref: "x", yref: "paper", x0: JOIN, x1: JOIN, y0: 0, y1: 1, line: {color: css("--muted"), width: 1, dash: "dot"}}],
-      annotations: [...(lay.annotations || []), {x: JOIN, xref: "x", y: 1, yref: "paper", text: "full run", showarrow: false, xanchor: "left", yanchor: "top", font: {size: 11, color: css("--muted")}}],
+      shapes: [...(lay.shapes || []), ...JOINS.map(j => ({type: "line", xref: "x", yref: "paper", x0: j.at, x1: j.at, y0: 0, y1: 1, line: {color: css("--muted"), width: 1, dash: "dot"}}))],
+      annotations: [...(lay.annotations || []), ...JOINS.map(j => ({x: j.at, xref: "x", y: 1, yref: "paper", text: j.label, showarrow: false, xanchor: "left", yanchor: "top", font: {size: 11, color: css("--muted")}}))],
     });
   }
   Plotly.react(id, traces, lay, {displaylogo: false, responsive: true, modeBarButtonsToRemove: ["lasso2d", "select2d"]});
@@ -156,9 +156,9 @@ function renderRun(run) {
   const manifest = run.reports.run_manifest, cfg = run.reports.grpo_config || {};
   const s0 = stage0F1();
   const last = m[m.length - 1] || {};
-  JOIN = run.chain ? run.chain.at : null;
+  JOINS = run.chain ? (run.chain.joins || [{at: run.chain.at, label: run.chain.child}]) : [];
   const iters = (cfg.config && cfg.config.iterations) || cfg.iterations;
-  const total = iters && JOIN !== null ? iters + JOIN : iters;
+  const total = iters && run.chain ? iters + run.chain.at : iters;
   const best = ev.reduce((b, e) => (b === null || e.f1 > b.f1) ? e : b, null);
   const lastEval = ev[ev.length - 1];
   const sftRef = s0 ?? PROJECT_A_SFT_F1;
@@ -272,7 +272,7 @@ function render() {
   if ([...sel.options].map(o => o.value).join() !== names.join()) {
     sel.replaceChildren(...names.map(n => el("option", {value: n}, n)));
     const saved = (() => { try { return localStorage.getItem("grpo-run"); } catch { return null; } })();
-    sel.value = names.includes(keep) ? keep : (names.includes(saved) ? saved : (DATA.runs.find(r => r.chain) || {}).name || names[names.length - 1] || "");
+    sel.value = names.includes(keep) ? keep : (names.includes(saved) ? saved : (DATA.runs.filter(r => r.chain).sort((a, b) => b.chain.joins.length - a.chain.joins.length || (b.metrics || []).length - (a.metrics || []).length)[0] || {}).name || names[names.length - 1] || "");
   }
   const run = DATA.runs.find(r => r.name === sel.value);
   const when = DATA.fetched ? new Date(DATA.fetched * 1000).toLocaleTimeString() : "—";

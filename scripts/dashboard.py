@@ -78,23 +78,31 @@ def chain_run(parent: dict, child: dict, at: int) -> dict:
             row["elapsed_hours"] += hours
         return row
 
+    head_evals = [e for e in parent["eval_history"] if e.get("step", 0) <= at]
+    parent_eval_at_join = any(e.get("step") == at for e in head_evals)  # else keep the child's step-0 eval (it is that step)
+    joins = [j for j in (parent.get("chain") or {}).get("joins", []) if j["at"] <= at] + [{"at": at, "label": child["name"]}]
     return {
         **child,
         "name": f"{child['name']} + {parent['name']} 1-{at}",
-        "chain": {"parent": parent["name"], "child": child["name"], "at": at},
+        "chain": {"parent": parent["name"], "child": child["name"], "at": at, "joins": joins},
         "metrics": head + [shift(m) for m in child["metrics"]],
-        "eval_history": [e for e in parent["eval_history"] if e.get("step", 0) <= at] + [shift(e) for e in child["eval_history"] if e.get("step", 0) > 0],
+        "eval_history": head_evals + [shift(e) for e in child["eval_history"] if e.get("step", 0) > 0 or not parent_eval_at_join],
     }
 
 
 def add_chains(runs: list[dict], chains: list[str]) -> list[dict]:
+    """Specs apply in order and a later one's PARENT means the chained run built earlier, so
+    `b=a:100 c=b:200` gives one run a 1-100, b 101-200, c 201-... (STEP counts from the chain's start)."""
     by_name = {r["name"]: r for r in runs}
     out = []
     for spec in chains:  # CHILD=PARENT:STEP
         child, _, rest = spec.partition("=")
         parent, _, at = rest.partition(":")
         if child in by_name and parent in by_name and at.isdigit():
-            out.append(chain_run(by_name[parent], by_name[child], int(at)))
+            chained = chain_run(by_name[parent], by_name[child], int(at))
+            by_name[child] = chained
+            out = [r for r in out if r["chain"]["child"] != parent]  # superseded by the longer chain
+            out.append(chained)
     return out + runs
 
 
