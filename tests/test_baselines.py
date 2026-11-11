@@ -131,6 +131,7 @@ def test_report_table_orders_methods(tmp_path):
     text = table([rep("grasp-grpo", 0.6, method=False), rep("ircot", 0.5), rep("llm", 0.2)])
     rows = [line.split("|")[1].strip() for line in text.splitlines()[2:]]
     assert rows == ["llm", "ircot", "grasp-grpo"] and "0.600" in text and "| – |" in text
+    assert text.splitlines()[-1].split("|")[6].strip() == "2.000"  # GRASP: QF searches + the first search
 
 
 def test_ircot_caps_the_context():

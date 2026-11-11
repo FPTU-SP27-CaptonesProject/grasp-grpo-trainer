@@ -4,6 +4,8 @@
 - single:        one search with the question (top-k), then the reader answers in one completion.
 - single-bedrock: as `single`, answered by a hosted chat model (default Qwen3-235B on Bedrock) with the
                  same reader prompt.
+- ircot-k1:      ircot with one new document per step: GRASP's exact budget (up to 5 searches x 1 document),
+                 so the only difference left is who picks the query and the evidence (thought+top-1 vs proxy).
 - ircot:         Trivedi et al. 2023: start from the question's top-k; each step the reader writes one
                  thought, that thought is the next query, and `docs_per_step` new documents join the context;
                  stop at <answer> or after `max_steps` (then the reader answers from scratch, as GRASP does).
@@ -33,7 +35,7 @@ from .reader import add_reader_arguments, extract_answer, reader_from_args
 from .retrieval import BoundRetriever, add_retrieval_arguments, retriever_from_args
 
 Emit = Callable[[str, dict[str, Any]], None] | None
-METHODS = ("llm", "single", "single-bedrock", "ircot")
+METHODS = ("llm", "single", "single-bedrock", "ircot", "ircot-k1")
 BEDROCK_URL = "https://bedrock-mantle.ap-southeast-2.api.aws/v1"
 
 
@@ -170,8 +172,9 @@ def main(argv: list[str] | None = None) -> None:
         bound = BoundRetriever(retriever, example, lock) if retriever is not None else None
         if args.method == "llm":
             return run_llm_only(reader, bound, example)
-        if args.method == "ircot":
-            return run_ircot(reader, bound, example, max_steps=args.max_steps, docs_per_step=args.docs_per_step, max_context_docs=args.max_context_docs)
+        if args.method in ("ircot", "ircot-k1"):  # k1: one doc per step, GRASP's own budget (5 searches x 1 evidence)
+            docs = 1 if args.method == "ircot-k1" else args.docs_per_step
+            return run_ircot(reader, bound, example, max_steps=args.max_steps, docs_per_step=docs, max_context_docs=args.max_context_docs)
         return run_single_step(reader, bound, example)
 
     def one(example: dict[str, Any]) -> dict[str, Any]:

@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-ORDER = ("llm", "single", "single-bedrock", "ircot", "grasp-sft", "grasp-grpo")
+ORDER = ("llm", "single", "single-bedrock", "ircot", "ircot-k1", "grasp-sft", "grasp-grpo")
 DATASETS = ("2wiki_ircot", "hotpotqa_abstracts_2017", "wiki18")
 
 
@@ -21,15 +21,22 @@ def row_name(path: Path, report: dict[str, Any]) -> str:
     return str(report.get("method") or path.stem)
 
 
+def searches(report: dict[str, Any]) -> float | None:
+    """Searches per question including the first one with the question. policy_eval (GRASP, no `method`) counts
+    only QF searches, while baselines.py counts every search; GRASP always searches the question first."""
+    value = report.get("mean_retrievals")
+    return None if value is None else value + (0.0 if report.get("method") else 1.0)
+
+
 def table(reports: list[tuple[Path, dict[str, Any]]]) -> str:
     rank = {name: i for i, name in enumerate(ORDER)}
     reports = sorted(reports, key=lambda item: (rank.get(row_name(*item), len(ORDER)), row_name(*item)))
-    head = ["Method", "n", "F1", "EM", "Recall", "Retrievals", *(f"F1 {d.split('_')[0]}" for d in DATASETS)]
+    head = ["Method", "n", "F1", "EM", "Recall", "Searches", *(f"F1 {d.split('_')[0]}" for d in DATASETS)]
     lines = ["| " + " | ".join(head) + " |", "|" + "---|" * len(head)]
     for path, r in reports:
         by = r.get("by_dataset", {})
         cells = [row_name(path, r), str(r.get("questions")), _fmt(r.get("f1")), _fmt(r.get("em")), _fmt(r.get("context_recall")),
-                 _fmt(r.get("mean_retrievals")), *(_fmt(by.get(d, {}).get("f1")) for d in DATASETS)]
+                 _fmt(searches(r)), *(_fmt(by.get(d, {}).get("f1")) for d in DATASETS)]
         lines.append("| " + " | ".join(cells) + " |")
     return "\n".join(lines)
 
