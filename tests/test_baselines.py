@@ -99,6 +99,7 @@ def test_chat_reader_answers_with_the_reader_prompt():
     assert answer == "Paris"
     prompt = sent[0]["messages"][0]["content"]
     assert "Title: T\nText: Paris is" in prompt and "Question: Where?" in prompt
+    assert "<think>" not in prompt and "<reason>" in prompt  # Qwen3 tokenizes <think> as a special token
     assert sent[0]["model"] == "big-model" and sent[0]["temperature"] == 0.0
 
 
