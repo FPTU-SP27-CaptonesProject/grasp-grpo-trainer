@@ -6,6 +6,7 @@
 # REPORT_IDS (default config/test_ids.json, 999 held-out dev questions) and REPORT_TAG (default: its stem) pick
 # the question set; REPORT_GRPO_ADAPTER is the GRPO adapter dir. A method whose report exists is skipped, so a
 # rerun resumes; each finished report is uploaded to HF (LOG_REPO reports/<tag>/) at once.
+# Smoke test: REPORT_LIMIT=6 REPORT_TAG=smoke bash scripts/report_eval_vast.sh baselines
 set -euo pipefail
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/grpo_vast_common.sh"
 activate_venv
@@ -31,7 +32,7 @@ case "$PHASE" in
       [[ "$method" == single-bedrock ]] && { require_value BEDROCK_API_KEY; export BEDROCK_API_KEY; }
       echo "== $method on $TAG"
       python -m grasp_grpo.baselines --method "$method" --qa "$EVAL_QA" --eval-ids "$IDS" --corpus-config "$CORPUS_CONFIG" \
-        --encoder-device "$DEVICE" "${READER_ARGS[@]}" --max-steps "${MAX_STEPS:-5}" --workers "${REPORT_WORKERS:-16}" --output "$out.tmp"
+        --encoder-device "$DEVICE" "${READER_ARGS[@]}" --max-steps "${MAX_STEPS:-5}" --workers "${REPORT_WORKERS:-16}" ${REPORT_LIMIT:+--limit "$REPORT_LIMIT"} --output "$out.tmp"
       mv "$out.tmp" "$out" && upload "$out"
     done ;;
   grasp)
