@@ -39,6 +39,37 @@ def test_run_example_follows_reader_and_proxy():
     assert [a["role"] for a in result["actions"]] == ["rd", "qf", "ki"]
 
 
+
+def test_emit_reports_each_step_without_changing_the_result():
+    example = {"id": "q1", "question": "Q?", "gold_answers": ["answer"], "gold_doc_ids": ["gold"], "metadata": {}}
+    plain = run_example(generate_fn, Reader(), Retriever(), example, max_steps=5)
+    events = []
+    traced = run_example(generate_fn, Reader(), Retriever(), example, max_steps=5, emit=lambda kind, data: events.append((kind, data)))
+    assert traced == plain
+    assert [kind for kind, _ in events] == ["retrieve", "thought", "rd", "qf", "retrieve", "ki", "answer"]
+    data = dict(events)
+    assert data["qf"]["query"] == "gold query" and data["qf"]["valid"]
+    assert data["ki"]["added_doc"] == "gold" and data["ki"]["chosen"] == 0
+    assert data["answer"]["text"] == "answer"
+    assert [d["query"] for kind, d in events if kind == "retrieve"] == ["Q?", "gold query"]
+
+
+class SilentReader(Reader):
+    def step(self, *args):
+        self.calls += 1
+        return ReaderStep("<think> need </think>\n", "need", None)
+
+    def final(self, *args):
+        return "late"
+
+
+def test_emit_reports_the_final_answer_after_max_steps():
+    example = {"id": "q1", "question": "Q?", "gold_answers": ["late"], "gold_doc_ids": [], "metadata": {}}
+    events = []
+    result = run_example(generate_fn, SilentReader(), Retriever(), example, max_steps=2, emit=lambda kind, data: events.append(kind))
+    assert result["prediction"] == "late"
+    assert events.count("thought") == 2 and events[-1] == "answer"
+
 def test_summarize_reports_quality_format_and_speed():
     examples = [{"id": "a", "gold_answers": ["x"], "gold_doc_ids": ["d1", "d2"]}, {"id": "b", "gold_answers": ["y"], "gold_doc_ids": []}]
     predictions = [

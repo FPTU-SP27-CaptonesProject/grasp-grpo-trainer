@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections.abc import Callable
+from typing import Any
 
 from .batcher import role_generate_fn
 from .contracts import candidate_index, parse, prompt
@@ -18,45 +20,65 @@ def act(generate_fn, role: str, state: dict) -> tuple[object, bool, str | None, 
     return parsed, valid, error, action.text
 
 
-def run_example(generate_fn, reader, retriever, example: dict, max_steps: int) -> dict:
+Emit = Callable[[str, dict[str, Any]], None] | None
+
+
+def run_example(generate_fn, reader, retriever, example: dict, max_steps: int, *, emit: Emit = None) -> dict:
+    """`emit(kind, data)` reports each step for the demo (retrieve, thought, rd, qf, ki, answer); it never
+    changes the result."""
+    def report(kind: str, data: dict[str, Any]) -> None:
+        if emit is not None:
+            emit(kind, data)
+
     select = getattr(retriever, "select", None)
     if select is not None:
         select(example)
     question = example["question"]
     context, thoughts, actions, transcript, answer = retriever.search(question), [], [], "", None
-    for _ in range(max_steps):
+    report("retrieve", {"step": 0, "query": question, "docs": list(context)})
+    for index in range(1, max_steps + 1):
         step = reader.step(question, context, thoughts, transcript)
         transcript += step.piece
         if step.answer is not None:
             answer = step.answer
+            report("answer", {"text": answer, "raw": step.piece})
             break
         if step.thought is None:
             break
         thought = step.thought
         thoughts.append(thought)
+        report("thought", {"step": index, "text": thought})
         state = {"question": question, "context": context, "thoughts": thoughts, "current_thought": thought}
         retrieve, valid, error, text = act(generate_fn, "rd", state)
         actions.append({"role": "rd", "response": text, "valid_format": valid, "validation_error": error})
         if not valid:
             retrieve = True
+        report("rd", {"step": index, "retrieve": bool(retrieve), "raw": text, "valid": valid})
         if not retrieve:
             continue
         qf, valid_qf, error, text = act(generate_fn, "qf", state)
         actions.append({"role": "qf", "response": text, "valid_format": valid_qf, "validation_error": error})
         query = str(qf.get("query") or question) if valid_qf else question
+        report("qf", {"step": index, "query": query, "chain": qf.get("chain", []) if valid_qf else [], "raw": text, "valid": valid_qf})
         passages = retriever.search(query)
+        report("retrieve", {"step": index, "query": query, "docs": passages})
         candidates = retriever.candidate_triples(query, passages, question=question)
         if not candidates:
+            report("ki", {"step": index, "candidates": [], "chosen": None, "raw": None, "valid": None, "added_doc": None})
             continue
         ki_state = {"question": question, "chain": qf.get("chain", []) if valid_qf else [], "query": query, "candidates": candidates}
         selected, valid_ki, error, text = act(generate_fn, "ki", ki_state)
         actions.append({"role": "ki", "response": text, "valid_format": valid_ki, "validation_error": error})
         chosen = candidate_index(selected if valid_ki else None, candidates)
         evidence = next((item for item in passages if item["doc_id"] == candidates[chosen if chosen is not None else 0]["doc_id"]), passages[0])
-        if all(item["doc_id"] != evidence["doc_id"] for item in context):
+        added = all(item["doc_id"] != evidence["doc_id"] for item in context)
+        if added:
             context.append(evidence)
+        report("ki", {"step": index, "candidates": candidates, "chosen": chosen if chosen is not None else 0, "raw": text, "valid": valid_ki,
+                      "added_doc": evidence["doc_id"] if added else None})
     if answer is None:
         answer = reader.final(question, context, thoughts, transcript)
+        report("answer", {"text": answer, "raw": None})
     return {"id": example["id"], "prediction": answer, "context_doc_ids": [item["doc_id"] for item in context], "actions": actions,
             "thoughts": thoughts, "transcript": transcript}
 
