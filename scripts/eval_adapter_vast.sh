@@ -3,11 +3,15 @@
 # running policy server under its own name (unloaded on exit); by default E5 stays on the CPU, so the training
 # GPU gets no extra memory. Usage: EVAL_ADAPTER=<adapter dir> [EVAL_OUTPUT=<json>] bash scripts/eval_adapter_vast.sh
 set -euo pipefail
+# The caller's EVAL_IDS wins over vast.env (report_eval_vast.sh passes the test set; vast.env holds eval300).
+caller_ids="${EVAL_IDS:-}"
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/grpo_vast_common.sh"
 activate_venv
 for key in EVAL_ADAPTER EVAL_QA EVAL_IDS CORPUS_CONFIG POLICY_URL OUTPUT_ROOT; do require_value "$key"; done
 reader_args
 extract_args
+EVAL_IDS="${caller_ids:-$EVAL_IDS}"
+echo "eval ids: $EVAL_IDS"
 adapter="$(cd -- "$EVAL_ADAPTER" && pwd)"
 name="eval-$(date -u +%m%d%H%M%S)"
 out="${EVAL_OUTPUT:-$OUTPUT_ROOT/eval-$(basename "$adapter")-$(date -u +%m%d%H%M).json}"

@@ -25,6 +25,11 @@ upload() {
     || echo "upload failed for $1 (kept locally)" >&2
 }
 
+# A report must cover every id in $IDS: eval_adapter_vast.sh once ran eval300 from vast.env instead (2026-11-12).
+check_count() {
+  python -c 'import json,sys; n=json.load(open(sys.argv[1]))["questions"]; m=len(json.load(open(sys.argv[2]))["ids"]); sys.exit(0 if n==m else f"{sys.argv[1]}: {n} questions, {sys.argv[2]} has {m}")' "$1" "$IDS"
+}
+
 case "$PHASE" in
   baselines)
     for method in ${REPORT_METHODS:-llm single single-bedrock ircot}; do
@@ -34,7 +39,7 @@ case "$PHASE" in
       echo "== $method on $TAG"
       python -m grasp_grpo.baselines --method "$method" --qa "$EVAL_QA" --eval-ids "$IDS" --corpus-config "$CORPUS_CONFIG" \
         --encoder-device "$DEVICE" "${READER_ARGS[@]}" --max-steps "${MAX_STEPS:-5}" --workers "${REPORT_WORKERS:-16}" ${REPORT_LIMIT:+--limit "$REPORT_LIMIT"} --output "$out.tmp"
-      mv "$out.tmp" "$out" && upload "$out"
+      check_count "$out.tmp" && mv "$out.tmp" "$out" && upload "$out"
     done ;;
   grasp)
     # REPORT_ADAPTERS="name=dir name=dir ..." evaluates several checkpoints (one row each; list grasp-sft yourself
@@ -51,7 +56,7 @@ case "$PHASE" in
       echo "== $name ($adapter) on $TAG"
       EVAL_ADAPTER="$adapter" EVAL_IDS="$IDS" EVAL_OUTPUT="$out.tmp" EVAL_ENCODER_DEVICE="$DEVICE" EVAL_WORKERS="${REPORT_WORKERS:-16}" \
         bash "$SCRIPT_DIR/eval_adapter_vast.sh"
-      mv "$out.tmp" "$out" && upload "$out"
+      check_count "$out.tmp" && mv "$out.tmp" "$out" && upload "$out"
     done ;;
   table) ;;
   *) echo "usage: $0 baselines|grasp|table" >&2; exit 2 ;;
