@@ -146,9 +146,9 @@ def _bedrock_chat(model: str):
     if not api_key:
         raise RuntimeError("BEDROCK_API_KEY is not set (needed for --extract-triples)")
     # A hung call stalls the rollout waiting on its document (and the whole step): 180 s x 9 attempts left lr2e5c
-    # idle for over an hour on 2026-11-12 while Bedrock answered slowly. A failure is not cached and is retried later.
+    # idle for over an hour on 2026-11-12, when about 1 call in 3 hung while the rest took 6-7 s (1024 tokens max: ~25 s). A failure is not cached and is retried later.
     client = OpenAI(base_url=os.environ.get("BEDROCK_BASE_URL", DEFAULT_BASE_URL), api_key=api_key,
-                    timeout=float(os.environ.get("EXTRACT_TIMEOUT", "60")), max_retries=int(os.environ.get("EXTRACT_RETRIES", "2")))
+                    timeout=float(os.environ.get("EXTRACT_TIMEOUT", "30")), max_retries=int(os.environ.get("EXTRACT_RETRIES", "3")))
 
     def chat(prompt: str, max_tokens: int) -> tuple[str, int, int]:
         try:

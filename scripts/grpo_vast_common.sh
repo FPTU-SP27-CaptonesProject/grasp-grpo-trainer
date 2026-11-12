@@ -90,6 +90,8 @@ extract_args() {
     require_value BEDROCK_API_KEY
     export BEDROCK_API_KEY
     [[ -n "${BEDROCK_BASE_URL:-}" ]] && export BEDROCK_BASE_URL
+    [[ -n "${EXTRACT_TIMEOUT:-}" ]] && export EXTRACT_TIMEOUT
+    [[ -n "${EXTRACT_RETRIES:-}" ]] && export EXTRACT_RETRIES
     EXTRACT_ARGS=(--extract-triples --extract-budget-usd "${EXTRACT_BUDGET_USD:-10}")
   fi
   return 0
