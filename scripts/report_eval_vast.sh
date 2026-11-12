@@ -6,6 +6,7 @@
 # REPORT_IDS (default config/test_ids.json, 999 held-out dev questions) and REPORT_TAG (default: its stem) pick
 # the question set; REPORT_GRPO_ADAPTER is the GRPO adapter dir. A method whose report exists is skipped, so a
 # rerun resumes; each finished report is uploaded to HF (LOG_REPO reports/<tag>/) at once.
+# Several GRPO checkpoints: REPORT_ADAPTERS="grasp-sft=$SFT_CHECKPOINT grasp-grpo-s100=/path ..." ... grasp
 # Smoke test: REPORT_LIMIT=6 REPORT_TAG=smoke bash scripts/report_eval_vast.sh baselines
 set -euo pipefail
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/grpo_vast_common.sh"
@@ -36,8 +37,15 @@ case "$PHASE" in
       mv "$out.tmp" "$out" && upload "$out"
     done ;;
   grasp)
-    require_value REPORT_GRPO_ADAPTER
-    for pair in "grasp-sft=$SFT_CHECKPOINT" "grasp-grpo=$REPORT_GRPO_ADAPTER"; do
+    # REPORT_ADAPTERS="name=dir name=dir ..." evaluates several checkpoints (one row each; list grasp-sft yourself
+    # if wanted). Two sessions with disjoint lists run side by side on one policy server.
+    if [[ -n "${REPORT_ADAPTERS:-}" ]]; then
+      read -ra pairs <<< "$REPORT_ADAPTERS"
+    else
+      require_value REPORT_GRPO_ADAPTER
+      pairs=("grasp-sft=$SFT_CHECKPOINT" "grasp-grpo=$REPORT_GRPO_ADAPTER")
+    fi
+    for pair in "${pairs[@]}"; do
       name="${pair%%=*}"; adapter="${pair#*=}"; out="$OUT/$name.json"
       [[ -s "$out" ]] && { echo "skip $name (exists)"; continue; }
       echo "== $name ($adapter) on $TAG"
