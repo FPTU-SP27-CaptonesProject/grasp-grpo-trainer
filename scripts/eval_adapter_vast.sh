@@ -13,7 +13,7 @@ extract_args
 EVAL_IDS="${caller_ids:-$EVAL_IDS}"
 echo "eval ids: $EVAL_IDS"
 adapter="$(cd -- "$EVAL_ADAPTER" && pwd)"
-name="eval-$(date -u +%m%d%H%M%S)"
+name="eval-$(date -u +%m%d%H%M%S)-$$"  # pid: two sessions started in the same second collided
 out="${EVAL_OUTPUT:-$OUTPUT_ROOT/eval-$(basename "$adapter")-$(date -u +%m%d%H%M).json}"
 admin() { curl -sf -X POST "${POLICY_URL%/}/$1" -H "Authorization: Bearer $READER_API_KEY" -H "Content-Type: application/json" -d "$2"; }
 admin load_lora_adapter "{\"lora_name\": \"$name\", \"lora_path\": \"$adapter\"}"
