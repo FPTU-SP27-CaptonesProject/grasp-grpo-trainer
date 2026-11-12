@@ -23,9 +23,14 @@ def act(generate_fn, role: str, state: dict) -> tuple[object, bool, str | None, 
 Emit = Callable[[str, dict[str, Any]], None] | None
 
 
-def run_example(generate_fn, reader, retriever, example: dict, max_steps: int, *, emit: Emit = None) -> dict:
+INSUFFICIENT = "Insufficient information"
+
+
+def run_example(generate_fn, reader, retriever, example: dict, max_steps: int, *, emit: Emit = None,
+                max_empty_ki: int | None = None) -> dict:
     """`emit(kind, data)` reports each step for the demo (retrieve, thought, rd, qf, ki, answer); it never
-    changes the result."""
+    changes the result. `max_empty_ki` (demo only; None = off, as in every reported eval): after that many
+    searches whose documents have no triples for KI, stop and answer INSUFFICIENT instead of guessing."""
     def report(kind: str, data: dict[str, Any]) -> None:
         if emit is not None:
             emit(kind, data)
@@ -35,6 +40,7 @@ def run_example(generate_fn, reader, retriever, example: dict, max_steps: int, *
         select(example)
     question = example["question"]
     context, thoughts, actions, transcript, answer = retriever.search(question), [], [], "", None
+    empty_ki = 0
     report("retrieve", {"step": 0, "query": question, "docs": list(context)})
     for index in range(1, max_steps + 1):
         step = reader.step(question, context, thoughts, transcript)
@@ -65,6 +71,11 @@ def run_example(generate_fn, reader, retriever, example: dict, max_steps: int, *
         candidates = retriever.candidate_triples(query, passages, question=question)
         if not candidates:
             report("ki", {"step": index, "candidates": [], "chosen": None, "raw": None, "valid": None, "added_doc": None})
+            empty_ki += 1
+            if max_empty_ki is not None and empty_ki >= max_empty_ki:
+                answer = INSUFFICIENT
+                report("answer", {"text": answer, "raw": None, "reason": f"no triple candidates in {empty_ki} searches"})
+                break
             continue
         ki_state = {"question": question, "chain": qf.get("chain", []) if valid_qf else [], "query": query, "candidates": candidates}
         selected, valid_ki, error, text = act(generate_fn, "ki", ki_state)

@@ -117,3 +117,32 @@ def test_signal_probe_counts_zero_signal_trees():
     probe = signal_probe(lambda example: Env(next(trees)), [{}, {}, {}], workers=1)
     assert probe["trees"] == 3 and probe["action_trees"] == 2
     assert probe["zero_signal_fraction"] == 0.5
+
+
+
+class NoTriples(Retriever):
+    def candidate_triples(self, query, passages, question=None):
+        return []
+
+
+class ThinkingReader(Reader):
+    def step(self, *args):
+        self.calls += 1
+        return ReaderStep("<think> need </think>\n", "need", None)
+
+    def final(self, *args):
+        return "guess"
+
+
+def test_max_empty_ki_stops_with_insufficient_information():
+    example = {"id": "q1", "question": "Q?", "gold_answers": ["a"], "gold_doc_ids": [], "metadata": {}}
+    events = []
+    result = run_example(generate_fn, ThinkingReader(), NoTriples(), example, max_steps=5, max_empty_ki=2, emit=lambda k, d: events.append((k, d)))
+    assert result["prediction"] == "Insufficient information"
+    assert [k for k, _ in events].count("ki") == 2 and events[-1][0] == "answer" and "reason" in events[-1][1]
+
+
+def test_max_empty_ki_off_by_default_keeps_the_old_behaviour():
+    example = {"id": "q1", "question": "Q?", "gold_answers": ["a"], "gold_doc_ids": [], "metadata": {}}
+    result = run_example(generate_fn, ThinkingReader(), NoTriples(), example, max_steps=5)
+    assert result["prediction"] == "guess"
