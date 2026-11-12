@@ -57,7 +57,8 @@ def run_example(generate_fn, reader, retriever, example: dict, max_steps: int) -
             context.append(evidence)
     if answer is None:
         answer = reader.final(question, context, thoughts, transcript)
-    return {"id": example["id"], "prediction": answer, "context_doc_ids": [item["doc_id"] for item in context], "actions": actions}
+    return {"id": example["id"], "prediction": answer, "context_doc_ids": [item["doc_id"] for item in context], "actions": actions,
+            "thoughts": thoughts, "transcript": transcript}
 
 
 def main() -> None:

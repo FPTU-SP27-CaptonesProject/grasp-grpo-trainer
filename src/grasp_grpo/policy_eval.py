@@ -71,7 +71,8 @@ def _by_dataset(examples: list[dict[str, Any]], rows: list[dict[str, Any]], by_i
     return {name: {"questions": len(g["f1"]), "f1": _mean(g["f1"]), "em": _mean(g["em"]), "context_recall": _mean(g["recall"])} for name, g in sorted(groups.items())}
 
 
-def evaluate_policy(generate_fn, reader, retriever, examples: list[dict[str, Any]], *, max_steps: int, workers: int, lock: threading.Lock | None = None) -> dict[str, Any]:
+def evaluate_policy(generate_fn, reader, retriever, examples: list[dict[str, Any]], *, max_steps: int, workers: int, lock: threading.Lock | None = None,
+                    keep_predictions: bool = False) -> dict[str, Any]:
     """`lock` must be the one every other user of `retriever` holds (training's async rollouts keep running
     during eval): the retriever's sqlite connections and its selected corpus are not thread-safe. A private
     lock here let eval and step-101 rollouts interleave and crashed the 2026-11-11 run at the step-100 eval."""
@@ -83,7 +84,10 @@ def evaluate_policy(generate_fn, reader, retriever, examples: list[dict[str, Any
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         predictions = list(pool.map(one, examples))
-    return summarize(examples, predictions, time.monotonic() - started)
+    report = summarize(examples, predictions, time.monotonic() - started)
+    if keep_predictions:  # answers, contexts, thoughts and actions, for a later RAGAS pass (not in training evals)
+        report["predictions"] = predictions
+    return report
 
 
 def interleave_datasets(examples: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -141,7 +145,7 @@ def main(argv: list[str] | None = None) -> None:
         batcher = GenerationBatcher(lambda prompts, **kwargs: generate_batch(actor, tokenizer, prompts, **kwargs), max_batch=args.max_batch)
         generate = batcher.generate
     reader = reader_from_args(args)
-    report = evaluate_policy(role_generate_fn(generate, temperature=0.0, top_p=1.0), reader, retriever, examples, max_steps=args.max_steps, workers=args.workers)
+    report = evaluate_policy(role_generate_fn(generate, temperature=0.0, top_p=1.0), reader, retriever, examples, max_steps=args.max_steps, workers=args.workers, keep_predictions=True)
     if args.signal_probe:
         lock = threading.Lock()
         sample_fn = role_generate_fn(generate, temperature=args.temperature, top_p=args.top_p)
@@ -159,7 +163,7 @@ def main(argv: list[str] | None = None) -> None:
         batcher.close()
     retriever.close()
     write_json(args.output, report)
-    print(json.dumps({key: value for key, value in report.items() if key != "per_question"}))
+    print(json.dumps({key: value for key, value in report.items() if key not in ("per_question", "predictions")}))
 
 
 if __name__ == "__main__":
